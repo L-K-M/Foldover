@@ -11,8 +11,8 @@ use foldover_endpoint::{
 };
 use foldover_host::{Environment, EnvironmentHold, LowPowerSyncs, NetworkUse};
 use foldover_state::{
-    Device, HistoryEntry, Journal, JournalUpdate, MountSources, PairStore, Pause, Purge, Share,
-    SnapshotEntry, StateLocation, WatchCursor,
+    Device, HistoryEntry, InterruptedRun, Journal, JournalUpdate, MountSources, PairStore, Pause,
+    Purge, Resume, RunEnd, Share, SnapshotEntry, StateLocation, WatchCursor, WritingRun,
 };
 use foldover_types::{
     DeviceId, Durability, Effort, EndpointId, FolderRecords, FolderRole, LocalRoot,
@@ -425,9 +425,46 @@ impl Engine {
         Ok(self.pairs.remove_share(id)?)
     }
 
-    /// The pair's newest writing run, while it can still be undone.
+    /// The pair's newest writing run, or chain of runs, while it can
+    /// still be undone.
     pub fn journal(&self, id: PairId) -> Result<Option<Journal>, Error> {
         Ok(self.pairs.journal(id)?)
+    }
+
+    /// The pair's writing run starts at `started` under `revision`
+    /// (ADR 0055). It continues the journal of an unfinished run before
+    /// it while that journal's archive folders outlive the run: a chain
+    /// older than the archive retention minus a day starts afresh.
+    pub fn admit_run(
+        &mut self,
+        id: PairId,
+        started: std::time::SystemTime,
+        run: WritingRun,
+        revision: u64,
+        resume: Resume,
+    ) -> Result<(), Error> {
+        let cutoff = started
+            .checked_sub(crate::run::CHAIN_RETENTION)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        Ok(self
+            .pairs
+            .admit_run(id, started, run, revision, resume, cutoff)?)
+    }
+
+    /// The pair's admitted run ended as `end`.
+    pub fn end_run(&mut self, id: PairId, end: RunEnd) -> Result<(), Error> {
+        Ok(self.pairs.end_run(id, end)?)
+    }
+
+    /// At an agent start, the runs the agent before it never saw end;
+    /// `unclean` when that agent stopped uncleanly.
+    pub fn interrupted_at_start(&mut self, unclean: bool) -> Result<Vec<InterruptedRun>, Error> {
+        Ok(self.pairs.interrupted_at_start(unclean)?)
+    }
+
+    /// A person chose not to continue the pair's interrupted run.
+    pub fn forget_interrupted(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.forget_interrupted(id)?)
     }
 
     /// Whether the pair has completed a first sync, which records identities.
@@ -470,10 +507,10 @@ impl Engine {
                     .pairs
                     .update_base(id, revision, &[], JournalUpdate::Undid { run, seqs })?)
             }
-            Commit::Undone { run, updates } => {
+            Commit::Undone { updates } => {
                 Ok(self
                     .pairs
-                    .update_base(id, revision, updates, JournalUpdate::Spend { run })?)
+                    .update_base(id, revision, updates, JournalUpdate::Spend)?)
             }
         }
     }

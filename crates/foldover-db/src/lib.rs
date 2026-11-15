@@ -8,7 +8,7 @@ mod database;
 #[cfg(unix)]
 pub use database::{
     AutomationSettingRow, BaseBlob, BaseChange, BaseRow, Database, DeviceRow, Error, HistoryRow,
-    IdentityRow, JournalChange, JournalRow, MountRow, PairRow, PairValues, PauseRow, Purge,
-    ReadView, ReadViewError, ResolutionRow, RunMarker, ShareRow, SnapshotBlob, SnapshotData,
-    SnapshotRow, StateLocation, WatchCursorRow,
+    IdentityRow, InterruptedRow, JournalChange, JournalRow, MountRow, PairRow, PairValues,
+    PauseRow, Purge, ReadView, ReadViewError, ResolutionRow, RunEnd, RunMarker, ShareRow,
+    SnapshotBlob, SnapshotData, SnapshotRow, StateLocation, WatchCursorRow,
 };

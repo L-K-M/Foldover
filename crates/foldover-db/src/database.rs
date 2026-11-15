@@ -13,6 +13,7 @@ mod cursor;
 mod device;
 mod history;
 mod hold;
+mod interrupted;
 mod journal;
 mod migration_backup;
 mod mounts;
@@ -27,6 +28,7 @@ mod starts;
 pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
+pub use interrupted::{InterruptedRow, RunEnd};
 pub use journal::{JournalChange, JournalRow};
 use migration_backup::create as backup;
 pub use mounts::MountRow;
@@ -66,11 +68,11 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 30] = [
+const MIGRATIONS: [&str; 31] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
-    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30,
+    SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -484,6 +486,27 @@ CREATE TABLE pair_pause (
 // ignore the column and run at full effort, so the floor stays.
 const SCHEMA_V30: &str = "
 ALTER TABLE automation_setting ADD COLUMN automatic_effort TEXT NOT NULL DEFAULT 'gentle' CHECK(automatic_effort IN ('gentle','full'));
+";
+
+// The pair's writing run the agent admitted and has not seen end
+// (ADR 0055): `running` while it works, `interrupted` once a start finds
+// it still running, `ended` after it stopped without finishing, which
+// keeps its journal for the run that continues it. Older agents ignore
+// the table: they replace the journal as before and show no interrupted
+// run, so the floor stays.
+const SCHEMA_V31: &str = "
+CREATE TABLE interrupted_run (
+    pair_id BLOB PRIMARY KEY NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    started_ms INTEGER NOT NULL CHECK(started_ms >= 0),
+    trigger TEXT NOT NULL CHECK(trigger IN ('manual','scheduled')),
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    state TEXT NOT NULL CHECK(state IN ('running','interrupted','ended')),
+    resume TEXT NOT NULL CHECK(resume IN ('auto','manual')),
+    unclean INTEGER NOT NULL CHECK(unclean >= 0),
+    wrote INTEGER NOT NULL CHECK(wrote IN (0,1)),
+    keep_journal INTEGER NOT NULL CHECK(keep_journal IN (0,1)),
+    chain_ms INTEGER NOT NULL CHECK(chain_ms >= 0)
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -3018,22 +3041,15 @@ pub(super) mod tests {
             .record_identities(&id, 2, &[1; 16], &[2; 16])
             .unwrap();
         legacy
-            .change_base(
-                &id,
-                2,
-                &[put(b"kept", b"version")],
-                JournalChange::Record {
-                    run: "writing-run",
-                    rows: &[JournalRow {
-                        seq: 1,
-                        path: b"kept".to_vec(),
-                        side: "right".into(),
-                        action: "create".into(),
-                        version: b"version".to_vec(),
-                        base: None,
-                        source: None,
-                    }],
-                },
+            .change_base(&id, 2, &[put(b"kept", b"version")], JournalChange::None)
+            .unwrap();
+        // The shipping schema's journal row; today's recording also reads
+        // tables this schema lacks.
+        legacy
+            .connection
+            .execute(
+                "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version) VALUES (?1,'writing-run',1,?2,'right','create',?3)",
+                params![id.as_slice(), b"kept".as_slice(), b"version".as_slice()],
             )
             .unwrap();
         legacy.set_pause(Some(PauseRow { until_ms: None })).unwrap();

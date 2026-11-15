@@ -4,7 +4,13 @@
 //! ```text
 //! Idle ─start─▶ Working ─▶ Previewed | NeedsApproval | Finished | Undone | Failed
 //!                  └─cancel─▶ Idle (before writing) or Finished (cancelled)
+//! (agent start) ─▶ Interrupted ─cancel─▶ Idle
+//!                       └─start─▶ Working
 //! ```
+//!
+//! A writing run is admitted in the state database when it starts and
+//! ended there when its result publishes, so a run that ended with the
+//! agent shows as interrupted after a restart (ADR 0055).
 //!
 //! Jobs hold the engine lock only to read inputs and commit progress, so
 //! configuration requests stay responsive during long runs.
@@ -18,9 +24,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
 
 use foldover_engine::{
-    Action, Approval, Commit, Completion, DeletionReview, Effort, Engine, KeepBothError,
-    ObserveStep, PairRun, Preview, PreviewItem, RunContext, RunError, RunOutcome, RunProgress,
-    RunReport, ThreadEffort, UndoReport, missing_side, reconnect,
+    Action, Approval, Commit, Completion, DeletionReview, Effort, Engine, InterruptedRun,
+    KeepBothError, ObserveStep, PairRun, Preview, PreviewItem, Resume, RunContext, RunEnd,
+    RunError, RunOutcome, RunProgress, RunReport, ThreadEffort, UndoReport, WritingRun,
+    missing_side, reconnect,
 };
 use foldover_proto::local::RpcError;
 use foldover_proto::local::{
@@ -58,6 +65,17 @@ impl Work {
         }
     }
 
+    /// How a writing run is admitted (ADR 0055); previews and undos are
+    /// not. A scheduled run continues by itself after the agent stops; a
+    /// person's sync waits for the next one.
+    fn admission(self) -> Option<(WritingRun, Resume)> {
+        match self {
+            Self::Run(..) => Some((WritingRun::Manual, Resume::Manual)),
+            Self::Scheduled => Some((WritingRun::Scheduled, Resume::Auto)),
+            Self::Preview | Self::Undo => None,
+        }
+    }
+
     fn job(self) -> SyncJob {
         match self {
             Self::Preview => SyncJob::Preview,
@@ -65,6 +83,20 @@ impl Work {
             Self::Undo => SyncJob::Undo,
         }
     }
+}
+
+/// Unclean agent stops during a run, counting those during the runs it
+/// continues, after which it no longer continues by itself: a run that
+/// crashes the agent minutes in would otherwise restart it forever, as
+/// crash-loop safe mode only counts quick successive crashes (ADR 0055).
+const UNCLEAN_STOPS_BEFORE_HOLDING: u32 = 2;
+
+/// Whether a job's run was admitted in the state database, so its result
+/// ends the admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Admission {
+    Admitted,
+    NotAdmitted,
 }
 
 /// Each side's version of a conflicted path; `None` when absent.
@@ -272,6 +304,68 @@ pub(crate) struct Jobs {
 impl Jobs {
     pub(crate) fn read_ahead(&self) -> &ReadAhead {
         &self.read_ahead
+    }
+
+    /// Show the runs an agent start found interrupted (ADR 0055). Called
+    /// before any job can start, so it replaces no job's result.
+    pub(crate) fn load_interrupted(&self, runs: &[InterruptedRun]) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for run in runs {
+            let started = run
+                .started
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| {
+                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+                });
+            let status = SyncStatus::Interrupted {
+                started,
+                resumes: run.resume == Resume::Auto && run.unclean < UNCLEAN_STOPS_BEFORE_HOLDING,
+            };
+            state.jobs.insert(
+                run.pair,
+                Job {
+                    status,
+                    after: AfterFailure::Review,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    reviewed: None,
+                    progress: Arc::default(),
+                },
+            );
+        }
+    }
+
+    /// Pairs whose interrupted run continues by itself.
+    pub(crate) fn resumable(&self) -> HashSet<PairId> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .jobs
+            .iter()
+            .filter(|(_, job)| matches!(job.status, SyncStatus::Interrupted { resumes: true, .. }))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub(crate) fn is_interrupted(&self, id: PairId) -> bool {
+        matches!(self.status(id), SyncStatus::Interrupted { .. })
+    }
+
+    /// Show the pair idle once a person declined its interrupted run;
+    /// false when a job replaced that status meanwhile or is starting.
+    pub(crate) fn clear_interrupted(&self, id: PairId) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // A start holding a claim still shows the interrupted job until it
+        // publishes its own; the caller must cancel that start instead.
+        if state.claiming.contains_key(&id) {
+            return false;
+        }
+        if !matches!(
+            state.jobs.get(&id).map(|job| &job.status),
+            Some(SyncStatus::Interrupted { .. })
+        ) {
+            return false;
+        }
+        state.jobs.remove(&id);
+        true
     }
 
     pub(crate) fn is_working(&self, id: PairId) -> bool {
@@ -517,6 +611,7 @@ impl Jobs {
                         | SyncStatus::NeedsApproval { .. }
                         | SyncStatus::Undone { .. }
                         | SyncStatus::Failed { .. }
+                        | SyncStatus::Interrupted { .. }
                 ) => {}
             Some(job) => job.status = waiting,
             None => {
@@ -563,6 +658,8 @@ impl Jobs {
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
         let cancel = Arc::clone(&reservation.cancel);
+        // One start time for the admission and the run's history row.
+        let started = SystemTime::now();
         // Activation and claiming use the same engine-lock boundary as
         // configuration writes. A later edit is staged and cannot change
         // the active settings before this job's worker reads its inputs.
@@ -573,6 +670,21 @@ impl Jobs {
             .activate_pair_update(id)
             .map_err(|error| error.to_string());
         let pair = engine_guard.active_pair(id).map_err(crate::engine_error)?;
+        // Admitted under the engine lock, which the jobs lock never spans.
+        // Best effort: without the record the run still runs, it just
+        // cannot show as interrupted or keep its journal for a successor.
+        let admission = match (&activation, work.admission()) {
+            (Ok(()), Some((run, resume))) => {
+                match engine_guard.admit_run(id, started, run, pair.revision(), resume) {
+                    Ok(()) => Admission::Admitted,
+                    Err(error) => {
+                        eprintln!("foldoverd: the run's start cannot be recorded: {error}");
+                        Admission::NotAdmitted
+                    }
+                }
+            }
+            _ => Admission::NotAdmitted,
+        };
         drop(engine_guard);
         // Publish only after activation and capture. A status poll therefore
         // sees either the old terminal state or this exact active context.
@@ -585,8 +697,7 @@ impl Jobs {
         } = claim;
         let engine = Arc::clone(engine);
         let jobs = Arc::clone(self);
-        self.spawn(id, Some(Arc::clone(&engine)), move || {
-            let started = SystemTime::now();
+        self.spawn(id, Some(Arc::clone(&engine)), admission, move || {
             #[cfg(test)]
             jobs.wait_job_gate();
             let done = match activation {
@@ -603,6 +714,20 @@ impl Jobs {
         Ok(acknowledged)
     }
 
+    /// Hold a claim on `id` as a start does before it publishes its job,
+    /// with the claim's cancel flag, until the returned guard drops.
+    #[cfg(test)]
+    pub(crate) fn hold_claim(
+        self: &Arc<Self>,
+        id: PairId,
+        work: Work,
+    ) -> (Arc<AtomicBool>, Box<dyn std::any::Any>) {
+        let reservation = self
+            .reserve_claim(id, work)
+            .expect("the pair can be claimed");
+        (Arc::clone(&reservation.cancel), Box::new(reservation))
+    }
+
     /// Start a test-provided job through the same claim and publish path.
     #[cfg(test)]
     fn start_with(
@@ -614,7 +739,7 @@ impl Jobs {
     ) -> Result<SyncStatus, RpcError> {
         let reservation = self.reserve_claim(id, work)?;
         let acknowledged = reservation.publish(pair).acknowledged;
-        self.spawn(id, None, move || run().into());
+        self.spawn(id, None, Admission::NotAdmitted, move || run().into());
         Ok(acknowledged)
     }
 
@@ -837,11 +962,14 @@ impl Jobs {
 
     /// Run `run` on the blocking pool and publish its result. A panic
     /// publishes an explicit failure, never success and never a job that
-    /// stays Working, so the pair can take a later job.
+    /// stays Working, so the pair can take a later job. Any result ends an
+    /// admitted run: one that finished or a person cancelled is spent;
+    /// any other keeps its journal for the next run, and none is resumed.
     fn spawn(
         self: &Arc<Self>,
         id: PairId,
         engine: Option<Arc<Mutex<Engine>>>,
+        admission: Admission,
         run: impl FnOnce() -> Done + Send + 'static,
     ) {
         let jobs = Arc::clone(self);
@@ -866,6 +994,15 @@ impl Jobs {
             // cannot see the old job Working after activation and leave
             // a replacement stranded. No jobs lock spans database work.
             let mut engine = engine.as_ref().map(|engine| engine.lock());
+            if let (Admission::Admitted, Some(Ok(engine))) = (admission, engine.as_mut()) {
+                let end = match status {
+                    SyncStatus::Finished { .. } | SyncStatus::Idle => RunEnd::Spent,
+                    _ => RunEnd::Kept,
+                };
+                if let Err(error) = engine.end_run(id, end) {
+                    eprintln!("foldoverd: the run's end cannot be recorded: {error}");
+                }
+            }
             let activation = match engine.as_mut() {
                 Some(Ok(engine)) => engine
                     .activate_pair_update(id)

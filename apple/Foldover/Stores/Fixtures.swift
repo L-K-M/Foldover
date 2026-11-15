@@ -253,6 +253,9 @@ enum FixtureScenario: String {
     case syncingBackupRight = "syncing-backup-right"
     case failedRun = "failed-run"
     case foldApproval = "fold-approval"
+    /// The agent restarted during a sync a person started: Photos waits
+    /// to be synced again (ADR 0055).
+    case interrupted
 
     static var current: FixtureScenario? {
         UserDefaults.standard.string(forKey: "foldover-scenario").flatMap(FixtureScenario.init)
@@ -268,7 +271,8 @@ enum FixtureScenario: String {
         case .agentFailed:
             throw FixtureError.agentUnavailable
         case .noPairs, .manyPairs, .pairsFail, .syncing, .syncingSinglePair, .syncingReduced,
-             .syncingWaiting, .syncingBackup, .syncingBackupRight, .failedRun, .foldApproval:
+             .syncingWaiting, .syncingBackup, .syncingBackupRight, .failedRun, .foldApproval,
+             .interrupted:
             return AgentReport(version: "0.1.0")
         }
     }
@@ -426,6 +430,10 @@ actor FixtureSyncClient: SyncClient {
                     RunFailure(path: Data("2026/Trip/notes.md".utf8), message: "The server disconnected."),
                 ], failureCount: 2, archive: "tour-failed-run"))
         }
+        if scenario == .interrupted {
+            states[Fixtures.photosID] = .interrupted(
+                started: Date(timeIntervalSince1970: 1_792_000_000), resumes: false)
+        }
         if scenario == .foldApproval {
             let changes = Fixtures.changes(for: Fixtures.photosID)
             states[Fixtures.photosID] = .previewed(PreviewSummary(
@@ -554,6 +562,11 @@ actor FixtureSyncClient: SyncClient {
     }
 
     func cancel(_ id: String) async throws -> PairSyncState {
+        // Cancelling declines an interrupted sync.
+        if case .interrupted = states[id] {
+            states[id] = nil
+            return .idle
+        }
         // Launch-time working fixtures have no countdown job to remove.
         if jobs[id] == nil, case .working(.run, _, _, _) = states[id] {
             states[id] = .finished(finish(id, cancelled: true))

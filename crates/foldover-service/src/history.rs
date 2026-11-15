@@ -107,7 +107,12 @@ pub(crate) fn record(
         SyncStatus::Failed { message } => unwritten(HistoryOutcome::Failed, Some(message.clone())),
         // Cancelled before anything was written.
         SyncStatus::Idle => unwritten(HistoryOutcome::Cancelled, None),
-        SyncStatus::Working { .. } | SyncStatus::Previewed { .. } | SyncStatus::Waiting { .. } => {
+        // Nothing ended: a job never ends interrupted, which only an
+        // agent start reports for a run that ended with the agent.
+        SyncStatus::Working { .. }
+        | SyncStatus::Previewed { .. }
+        | SyncStatus::Waiting { .. }
+        | SyncStatus::Interrupted { .. } => {
             return;
         }
     };

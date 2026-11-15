@@ -127,10 +127,17 @@ fn require_current_user(peer: io::Result<u32>) -> io::Result<()> {
 /// acquiring that lock; a regular file or symlink is never treated as stale.
 pub struct Listener {
     listener: UnixListener,
-    _lock: File,
+    lock: File,
 }
 
 impl Listener {
+    /// Another handle on the runtime lock: it stays held while any handle
+    /// is open, so a process can hold it past the listener, e.g. while a
+    /// sync finishes after the agent stopped serving.
+    pub fn runtime_lock(&self) -> io::Result<File> {
+        self.lock.try_clone()
+    }
+
     pub fn bind(location: &SocketLocation) -> io::Result<Self> {
         let path = location.resolve()?;
         let parent = path
@@ -185,10 +192,7 @@ impl Listener {
             &path,
             std::os::unix::fs::PermissionsExt::from_mode(PRIVATE_FILE_MODE),
         )?;
-        Ok(Self {
-            listener,
-            _lock: lock,
-        })
+        Ok(Self { listener, lock })
     }
 
     pub async fn accept(&self) -> io::Result<Connection> {
@@ -280,6 +284,18 @@ mod tests {
         assert_eq!(server.read(&mut buffer).await.unwrap(), buffer.len());
         assert_eq!(&buffer, b"data");
         drop(listener);
+        assert!(Listener::bind(&location).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_runtime_lock_handle_outlives_the_listener() {
+        let directory = private_directory();
+        let location = SocketLocation::Path(directory.path().join("s"));
+        let listener = Listener::bind(&location).unwrap();
+        let lock = listener.runtime_lock().unwrap();
+        drop(listener);
+        assert!(Listener::bind(&location).is_err());
+        drop(lock);
         assert!(Listener::bind(&location).is_ok());
     }
 

@@ -19,6 +19,7 @@ use crate::base::{VERSION_BYTES, decode, decode_entry, encode};
 mod cursor;
 mod device;
 mod history;
+mod interrupted;
 mod journal;
 mod mounts;
 mod pause;
@@ -28,7 +29,8 @@ mod starts;
 pub use cursor::WatchCursor;
 pub use device::Device;
 pub use history::{HISTORY_LIMIT, HistoryEntry, HistoryOutcome, RunTrigger};
-pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate};
+pub use interrupted::{InterruptedRun, Resume, RunEnd, WritingRun};
+pub use journal::{Journal, JournalAction, JournalEntry, JournalUpdate, RunJournal};
 pub use mounts::MountSources;
 pub use pause::Pause;
 pub use settings::LowPowerSyncs;
@@ -845,7 +847,7 @@ mod tests {
         (directory, location)
     }
 
-    fn draft(mode: SyncMode) -> PairDraft {
+    pub(super) fn draft(mode: SyncMode) -> PairDraft {
         PairDraft::new(
             "Photos".into(),
             LocalRoot::from_bytes(b"/left/\xff".to_vec()).unwrap(),
@@ -1222,8 +1224,10 @@ mod tests {
         assert_eq!(
             store.journal(pair.id()).unwrap(),
             Some(Journal {
-                run: "2026-10-19T10-00-00.000Z".into(),
-                entries: entries.to_vec(),
+                runs: vec![RunJournal {
+                    run: "2026-10-19T10-00-00.000Z".into(),
+                    entries: entries.to_vec(),
+                }],
             })
         );
         assert_eq!(store.base(pair.id()).unwrap()[&path(b"edited")], new);
@@ -1234,9 +1238,7 @@ mod tests {
                 pair.id(),
                 pair.revision(),
                 &[BaseUpdate::Record(path(b"edited"), old)],
-                JournalUpdate::Spend {
-                    run: "2026-10-19T10-00-00.000Z",
-                },
+                JournalUpdate::Spend,
             )
             .unwrap();
         assert_eq!(store.journal(pair.id()).unwrap(), None);

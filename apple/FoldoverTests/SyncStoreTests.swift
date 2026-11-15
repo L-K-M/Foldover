@@ -943,6 +943,37 @@ func automaticSyncsWaitingForAFolderSayWhichOneQuietly() async {
 
 @MainActor
 @Test
+func anInterruptedSyncSaysWhetherItContinuesAndCanBeDeclined() async {
+    let started = Date(timeIntervalSince1970: 1_700_000_000)
+    let client = ScriptedSyncClient([.interrupted(started: started, resumes: true), .idle])
+    let store = SyncStore(client: client, pollInterval: .milliseconds(1))
+    let viewModel = PairSyncViewModel(pair: pair(), store: store, pairs: catalog(), agentConnected: true)
+    await viewModel.refresh()
+    #expect(viewModel.shortStatus == "Continues soon")
+    #expect(viewModel.statusText.contains("It continues by itself"))
+    #expect(viewModel.activity == .idle)
+    #expect(viewModel.declineTitle == "Don’t Resume")
+    #expect(viewModel.canStart)
+    #expect(!viewModel.canCancel)
+    #expect(SyncStore.alert(for: pair(), state: .interrupted(started: started, resumes: true)) == nil)
+
+    await viewModel.decline()
+    #expect(await client.cancelled)
+    #expect(viewModel.declineTitle == nil)
+
+    let waiting = SyncStore(client: ScriptedSyncClient([.interrupted(started: started, resumes: false)]),
+                            pollInterval: .milliseconds(1))
+    let held = PairSyncViewModel(pair: pair(), store: waiting, pairs: catalog(), agentConnected: true)
+    await held.refresh()
+    #expect(held.shortStatus == "Interrupted")
+    #expect(held.statusText.contains("Sync again to finish it"))
+    #expect(held.activity == .attention)
+    #expect(held.declineTitle == "Dismiss")
+    #expect(held.placeholder?.title == "Sync Interrupted")
+}
+
+@MainActor
+@Test
 func skipRulesMatchExactlyOnePath() {
     #expect(PairStore.skipRule(for: Data("docs/a*.txt".utf8)) == "/docs/a\\*.txt")
     #expect(PairStore.skipRule(for: Data("odd [1]{2}?\\ ".utf8)) == "/odd \\[1\\]\\{2\\}\\?\\\\\\ ")

@@ -106,6 +106,15 @@ W2 local → W1 ADR and W1(b) → W2 SFTP → W4.
 Killed scheduled runs already re-run; this item adds visibility, keeps
 Undo for both halves, handles manual pairs and bounds crash loops.
 
+**Status:** the core is implemented as
+[ADR 0055](adr/0055-interrupted-runs.md). It refines this section in two
+places: the row has three states (`running`, `interrupted`, and `ended`
+for a run that stopped without finishing, which keeps the journal for
+its successor but is never resumed), and the chain is two flags on the
+row (`wrote`, `keep_journal`) rather than a list of names, since the
+journal itself holds exactly the chain. Manual-pair resume
+(`Work::Resume`) is the next slice.
+
 - **Marker table, not a history row.** A new table in a v31 migration
   (current `SCHEMA_VERSION` is 30, `database.rs:41`):
   `interrupted_run (pair_id PRIMARY KEY REFERENCES pair ON DELETE CASCADE,

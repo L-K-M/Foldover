@@ -139,8 +139,15 @@ pub(super) fn apply_update(
     values: &PairValues,
 ) -> Result<PairRow, Error> {
     // A base and conflict choices hold versions of these roots under
-    // these metadata categories; changing either invalidates them.
-    for table in ["base_entry", "resolution", "snapshot_entry", "run_journal"] {
+    // these metadata categories; changing either invalidates them, and
+    // an interrupted run has nothing left to continue.
+    for table in [
+        "base_entry",
+        "resolution",
+        "snapshot_entry",
+        "run_journal",
+        "interrupted_run",
+    ] {
         transaction.execute(
                 &format!("DELETE FROM {table} WHERE pair_id=?1 AND EXISTS (SELECT 1 FROM pair WHERE id=?1 AND revision=?2 AND (left_root!=?3 OR right_root!=?4 OR modification_times!=?5 OR extended_attributes!=?6 OR permissions!=?7))"),
                 params![
@@ -262,7 +269,7 @@ mod tests {
             .unwrap();
         assert_eq!(database.base_rows(&original.id).unwrap().len(), 1);
         assert_eq!(
-            database.journal(&original.id).unwrap().unwrap().0,
+            database.journal(&original.id).unwrap().pop().unwrap().0,
             "old-run"
         );
         assert_eq!(database.snapshot(&original.id, "left").unwrap().len(), 1);
@@ -276,7 +283,7 @@ mod tests {
             2
         );
         assert_eq!(database.base_rows(&original.id).unwrap().len(), 1);
-        assert!(database.journal(&original.id).unwrap().is_some());
+        assert!(!database.journal(&original.id).unwrap().is_empty());
         assert_eq!(database.snapshot(&original.id, "left").unwrap().len(), 1);
         assert_eq!(
             database.identities(&original.id).unwrap().left,
@@ -425,7 +432,7 @@ mod tests {
             database.activate_pair_update(&original.id).unwrap();
             assert!(database.base_rows(&original.id).unwrap().is_empty());
             assert!(database.snapshot(&original.id, "right").unwrap().is_empty());
-            assert!(database.journal(&original.id).unwrap().is_none());
+            assert!(database.journal(&original.id).unwrap().is_empty());
             assert!(database.resolutions(&original.id).unwrap().is_empty());
         }
     }
@@ -492,7 +499,7 @@ mod tests {
             .unwrap();
         // V27 to V30 added tables and one column. Removing them and
         // restoring V26's metadata recreates a V26 state.
-        database.connection.execute_batch("ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
+        database.connection.execute_batch("DROP TABLE interrupted_run; ALTER TABLE automation_setting DROP COLUMN automatic_effort; DROP TABLE pair_pause; DROP TABLE pair_removal; DROP TABLE pending_pair; UPDATE state_meta SET minimum_reader=26; PRAGMA user_version=26;").unwrap();
         drop(database);
 
         let mut database = Database::open(&location).unwrap();

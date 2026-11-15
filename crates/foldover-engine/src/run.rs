@@ -63,6 +63,11 @@ const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const SPACE_RESERVE: u64 = 256 * 1024 * 1024;
 /// Owner decision (PLAN.md §10): archived versions are kept for 30 days.
 const ARCHIVE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// How old a continued run's journal may get: its oldest archive folder
+/// must outlive the continuing run, which prunes by folder age at its end,
+/// so Undo can still put back what that folder holds (ADR 0055).
+pub(crate) const CHAIN_RETENTION: Duration =
+    ARCHIVE_RETENTION.saturating_sub(Duration::from_secs(24 * 60 * 60));
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -195,12 +200,9 @@ pub enum Commit<'a> {
     /// Entries of `run` an undo reverted, so undoing again after a cancel
     /// or crash skips them.
     Undid { run: &'a str, seqs: &'a [u64] },
-    /// An undo of `run` finished: the last base restorations, and `run`'s
-    /// journal is spent.
-    Undone {
-        run: &'a str,
-        updates: &'a [BaseUpdate],
-    },
+    /// An undo of the journal's runs finished: the last base
+    /// restorations, and the journal is spent.
+    Undone { updates: &'a [BaseUpdate] },
 }
 
 /// Where a run reports how far it got, for the agent to show while it

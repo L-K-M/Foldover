@@ -20,20 +20,36 @@ enum Request {
     Usage,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     match request(env::args_os().skip(1)) {
         Request::Version => {
             println!("foldoverd {}", foldover_service::version());
             ExitCode::SUCCESS
         }
-        Request::Run(location) => match run(location).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("foldoverd: {error}");
-                ExitCode::FAILURE
+        Request::Run(location) => {
+            // Declared before the runtime, so dropped after it: dropping
+            // the runtime waits for a sync still running on its blocking
+            // pool, and until that ends no other agent may start and take
+            // that sync's run for interrupted (ADR 0055).
+            let mut lock = None;
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("foldoverd: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let result = runtime.block_on(run(location, &mut lock));
+            drop(runtime);
+            drop(lock);
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("foldoverd: {error}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Request::Help => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -45,12 +61,16 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(location: foldover_ipc::SocketLocation) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    location: foldover_ipc::SocketLocation,
+    lock: &mut Option<std::fs::File>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Hear a stop before starting anything slow, so one that comes while
     // the agent starts still ends cleanly instead of counting as a crash.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let listener = foldover_ipc::bind(&location)?;
+    *lock = Some(listener.runtime_lock()?);
     let service = foldover_service::Service::open()?;
     service.start_scheduler();
     // Finish deleting the rows of pairs removed before a stop.

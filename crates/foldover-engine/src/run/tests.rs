@@ -312,15 +312,24 @@ impl Store<'_> {
                 updates,
                 journal,
             } => {
+                // As the store does for a run continuing nothing: its
+                // first entries replace the journal's other runs.
                 match self.journal {
                     _ if journal.is_empty() => {}
-                    Some(current) if current.run == run => {
-                        current.entries.extend_from_slice(journal)
+                    Some(current) if current.runs.iter().any(|recorded| recorded.run == run) => {
+                        let recorded = current
+                            .runs
+                            .iter_mut()
+                            .find(|recorded| recorded.run == run)
+                            .expect("found above");
+                        recorded.entries.extend_from_slice(journal)
                     }
                     _ => {
                         *self.journal = Some(foldover_state::Journal {
-                            run: run.to_owned(),
-                            entries: journal.to_vec(),
+                            runs: vec![foldover_state::RunJournal {
+                                run: run.to_owned(),
+                                entries: journal.to_vec(),
+                            }],
                         })
                     }
                 }
@@ -328,19 +337,16 @@ impl Store<'_> {
             }
             Commit::Undoing { updates } => updates,
             Commit::Undid { run, seqs } => {
-                if let Some(journal) = self.journal.as_mut().filter(|journal| journal.run == run) {
-                    journal.entries.retain(|entry| !seqs.contains(&entry.seq));
+                let recorded = self.journal.as_mut().and_then(|journal| {
+                    journal.runs.iter_mut().find(|recorded| recorded.run == run)
+                });
+                if let Some(recorded) = recorded {
+                    recorded.entries.retain(|entry| !seqs.contains(&entry.seq));
                 }
                 return Ok(());
             }
-            Commit::Undone { run, updates } => {
-                if self
-                    .journal
-                    .as_ref()
-                    .is_some_and(|journal| journal.run == run)
-                {
-                    *self.journal = None;
-                }
+            Commit::Undone { updates } => {
+                *self.journal = None;
                 updates
             }
         };
@@ -3966,6 +3972,44 @@ fn undo_reverts_the_newest_run_and_the_next_preview_shows_the_redo() {
     assert!(pair.journal.is_none());
     // Syncing again would redo exactly what was undone.
     assert_eq!(pair.prepare().preview().items().len(), 5);
+}
+
+/// ADR 0055: a run continuing an interrupted one keeps its journal, and
+/// Undo reverts both, newest first, each from its own archive folder.
+#[test]
+fn undo_reverts_an_interrupted_run_and_the_run_that_continued_it() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("first.txt"), b"v1").unwrap();
+    fs::write(left.join("second.txt"), b"s1").unwrap();
+    fs::write(left.join("gone.txt"), b"g").unwrap();
+    pair.sync();
+    let before = pair.base.clone();
+
+    // The interrupted run got as far as one replace and one archive.
+    fs::write(left.join("first.txt"), b"version 2").unwrap();
+    fs::remove_file(left.join("gone.txt")).unwrap();
+    pair.ran(Approval::new(0, 1), at(1));
+    let interrupted = pair.journal.clone().expect("a journaled run");
+
+    // The run continuing it did the rest.
+    fs::write(left.join("second.txt"), b"s2").unwrap();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    pair.ran(Approval::default(), at(2));
+    let continued = pair.journal.clone().expect("a journaled run");
+    pair.journal = Some(foldover_state::Journal {
+        runs: interrupted.runs.into_iter().chain(continued.runs).collect(),
+    });
+
+    let undo = pair.undo_at(at(3));
+    assert!(undo.not_undone().is_empty(), "{:?}", undo.not_undone());
+    assert_eq!((undo.removed(), undo.restored()), (1, 3));
+    assert_eq!(fs::read(right.join("first.txt")).unwrap(), b"v1");
+    assert_eq!(fs::read(right.join("second.txt")).unwrap(), b"s1");
+    assert_eq!(fs::read(right.join("gone.txt")).unwrap(), b"g");
+    assert!(!right.join("new.txt").exists());
+    assert_eq!(pair.base, before);
+    assert!(pair.journal.is_none());
 }
 
 #[test]
