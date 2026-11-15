@@ -1463,8 +1463,6 @@ impl SftpEndpoint {
         }
     }
 
-    /// The version of an entry whose content is unchanged, from its
-    /// current attributes.
     /// What a write that stored the regular file `version` at `path`
     /// left there, as the next observation would list it (ADR 0056): one
     /// LSTAT after placement. The observation is reported only when the
@@ -1507,6 +1505,8 @@ impl SftpEndpoint {
         }
     }
 
+    /// The version of an entry whose content is unchanged, from its
+    /// current attributes.
     fn metadata_version_on(
         &self,
         session: &mut Session,
