@@ -38,8 +38,8 @@ pub use foldover_state::RecordedIdentities;
 pub use foldover_state::StateLocation;
 pub use foldover_state::WatchCursor;
 pub use foldover_state::{
-    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, MountSources, Pause, Purge, RunMarker,
-    RunTrigger, Share,
+    Device, HISTORY_LIMIT, HistoryEntry, HistoryOutcome, InterruptedRun, MountSources, Pause,
+    Purge, Resume, RunEnd, RunMarker, RunTrigger, Share, WritingRun,
 };
 pub use gates::{DeletionCounts, DeletionReview, InvalidDeletionCounts, RunContext};
 pub use peers::{

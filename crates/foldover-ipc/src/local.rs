@@ -53,6 +53,14 @@ pub struct Server {
     listener: Listener,
 }
 
+impl Server {
+    /// A handle that keeps the agent's runtime lock held after the server
+    /// is gone, until the handle closes.
+    pub fn runtime_lock(&self) -> std::io::Result<std::fs::File> {
+        self.listener.runtime_lock()
+    }
+}
+
 pub fn bind(location: &SocketLocation) -> Result<Server, Error> {
     Ok(Server {
         listener: Listener::bind(location)?,

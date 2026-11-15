@@ -24,7 +24,7 @@ METHOD_NOT_FOUND = -32601
 PERMISSION_DENIED = -32002
 PARSE_ERROR = -32700
 # Keep the raw-wire fixture aligned with foldover_proto::local::PROTOCOL_VERSION.
-PROTOCOL_VERSION = 23
+PROTOCOL_VERSION = 24
 VERSION_MISMATCH = -32001
 ROOT_OVERLAP = -32006
 STALE_REVISION = -32004
@@ -169,6 +169,36 @@ def synchronization(cli, endpoint, directory):
         raise RuntimeError(f"Conflicted sync reported the wrong outcome: {conflicted}")
     if (left / "note.txt").read_bytes() != b"left edit" or (right / "note.txt").read_bytes() != b"right edit":
         raise RuntimeError("Conflicted sync changed a version")
+    return pair
+
+
+def interrupt(database, pair):
+    """Leave the pair's sync admitted, as an agent killed during it does."""
+    with closing(sqlite3.connect(database, timeout=COMMAND_SECONDS)) as connection:
+        revision = connection.execute("SELECT revision FROM pair WHERE id=?",
+                                      (bytes.fromhex(pair),)).fetchone()[0]
+        started = int(time.time() * 1000)
+        connection.execute(
+            "INSERT INTO interrupted_run (pair_id,started_ms,trigger,revision,state,resume,unclean,"
+            "wrote,keep_journal,chain_ms) VALUES (?,?,'manual',?,'running','manual',0,0,0,?)",
+            (bytes.fromhex(pair), started, revision, started))
+        connection.commit()
+    return started
+
+
+def interruption(cli, endpoint, pair, started):
+    """After a restart, the sync the agent stopped during shows as
+    interrupted until a person declines it (ADR 0055)."""
+    status = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
+    if status != {"state": "interrupted", "started": started, "resumes": False}:
+        raise RuntimeError(f"A restart did not show the interrupted sync: {status}")
+    declined = invoke(cli, endpoint, ("sync", pair, "--cancel"))
+    status = json.loads(declined.stdout) if declined.returncode == 0 else {}
+    if status.get("state") != "idle":
+        raise RuntimeError(f"Declining the interrupted sync failed: {declined}")
+    again = private_exchange(endpoint, "sync.status", {"id": pair}).get("result", {})
+    if again.get("state") != "idle":
+        raise RuntimeError(f"A declined sync still shows: {again}")
 
 
 def restoration(cli, endpoint, directory):
@@ -333,8 +363,9 @@ def main():
             if unnegotiated.get("error", {}).get("code") != expected:
                 raise RuntimeError(f"Private route accepted an unnegotiated session: {unnegotiated}")
             pair = configuration(cli, endpoint, home, arguments.configuration)
+            docs = None
             if pair is not None:
-                synchronization(cli, endpoint, home)
+                docs = synchronization(cli, endpoint, home)
                 restoration(cli, endpoint, home)
                 preview_paging(cli, endpoint, home)
                 sync_all_results(cli, endpoint)
@@ -355,12 +386,15 @@ def main():
             if "result" not in response or "id" not in response or response["id"] is not None:
                 raise RuntimeError(f"Notification/null ID behavior is wrong: {response}")
 
+            started = interrupt(state / "state.db", docs) if docs is not None else None
             child.kill()
             child.wait(timeout=COMMAND_SECONDS)
             if invoke(cli, endpoint).returncode == 0:
                 raise RuntimeError("CLI reported an unavailable agent as connected")
             child.stderr.close()
             child = start(agent, cli, endpoint, environment)
+            if docs is not None:
+                interruption(cli, endpoint, docs, started)
             if pair is not None:
                 saved = invoke(cli, endpoint, ("pairs", "show", pair["id"]))
                 if saved.returncode != 0 or json.loads(saved.stdout) != pair:

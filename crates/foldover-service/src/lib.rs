@@ -74,7 +74,7 @@ impl Service {
     /// The agent's service over the default state. Its start is recorded,
     /// and a start after a crash loop enters safe mode (PLAN.md §4.2).
     pub fn open() -> Result<Self, foldover_engine::Error> {
-        let engine = Engine::open(&StateLocation::Default)?;
+        let mut engine = Engine::open(&StateLocation::Default)?;
         let now = std::time::SystemTime::now();
         // Counting crashes must never be what keeps the agent from
         // starting: without the record, it starts outside safe mode.
@@ -82,8 +82,19 @@ impl Service {
             eprintln!("foldoverd: unclean stops cannot be counted: {error}");
             Vec::new()
         });
+        // This start found the agent before it stopped uncleanly.
+        let unclean = stops.last() == Some(&now);
+        // Runs that ended with the agent before this one show as
+        // interrupted, before the scheduler can start anything (ADR 0055).
+        let interrupted = engine
+            .interrupted_at_start(unclean)
+            .unwrap_or_else(|error| {
+                eprintln!("foldoverd: interrupted runs cannot be read: {error}");
+                Vec::new()
+            });
         let service = Self::new(engine);
         service.safe_mode.judge(&stops, now);
+        service.jobs.load_interrupted(&interrupted);
         Ok(service)
     }
 
@@ -314,7 +325,7 @@ impl Service {
                     SYNC_PREVIEW => self.start_job(id, Work::Preview).await?,
                     SYNC_UNDO => self.start_job(id, Work::Undo).await?,
                     SYNC_CANCEL => {
-                        self.jobs.cancel(id);
+                        self.cancel(id).await?;
                         self.jobs.status(id)
                     }
                     _ => self.jobs.status(id),
@@ -322,6 +333,29 @@ impl Service {
             }
         };
         encode(status)
+    }
+
+    /// Stop the pair's job, or decline its interrupted run so nothing
+    /// continues it (ADR 0055). A job that started meanwhile is stopped.
+    async fn cancel(&self, id: PairId) -> Result<(), RpcError> {
+        if !self.jobs.is_interrupted(id) {
+            self.jobs.cancel(id);
+            return Ok(());
+        }
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || {
+            engine
+                .lock()
+                .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))?
+                .forget_interrupted(id)
+                .map_err(engine_error)
+        })
+        .await
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "The sync engine failed"))??;
+        if !self.jobs.clear_interrupted(id) {
+            self.jobs.cancel(id);
+        }
+        Ok(())
     }
 
     async fn start_job(
@@ -1646,6 +1680,148 @@ mod tests {
 
         // That start covers the interval.
         assert!(run_due_started(&service, at(90)).await.is_empty());
+    }
+
+    /// A run the agent before this one was running when it stopped, as a
+    /// start finds it (ADR 0055).
+    fn interrupt(
+        service: &Service,
+        id: PairId,
+        run: foldover_engine::WritingRun,
+        resume: foldover_engine::Resume,
+        unclean: bool,
+    ) {
+        let mut engine = service.engine.lock().unwrap();
+        let revision = engine.active_pair(id).unwrap().revision();
+        engine
+            .admit_run(id, SystemTime::now(), run, revision, resume)
+            .unwrap();
+        let interrupted = engine.interrupted_at_start(unclean).unwrap();
+        drop(engine);
+        service.jobs.load_interrupted(&interrupted);
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_run_the_agent_stopped_during_continues_once_its_holds_allow() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 24 * 60});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+        assert!(run_due_started(&service, at(30)).await.is_empty());
+
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Scheduled,
+            foldover_engine::Resume::Auto,
+            false,
+        );
+        let status = service
+            .handle(Request::call(2, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "interrupted");
+        assert_eq!(status["resumes"], true);
+
+        // A pause holds it, as it holds every automatic sync.
+        service
+            .handle(Request::call(3, PAIR_PAUSE, Some(key.clone())))
+            .await
+            .unwrap();
+        assert!(run_due_started(&service, at(60)).await.is_empty());
+        service
+            .handle(Request::call(4, PAIR_RESUME, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(run_due_started(&service, at(90)).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+
+        // Finished, it leaves nothing to continue.
+        assert!(
+            service
+                .engine
+                .lock()
+                .unwrap()
+                .interrupted_at_start(false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(run_due_started(&service, at(120)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn declined_and_crash_looping_interrupted_runs_do_not_continue() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Photos")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        // A person's sync waits for the next one; cancelling declines it.
+        interrupt(
+            &service,
+            id,
+            foldover_engine::WritingRun::Manual,
+            foldover_engine::Resume::Manual,
+            false,
+        );
+        let status = service
+            .handle(Request::call(2, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&status["state"], &status["resumes"]),
+            (&json!("interrupted"), &json!(false))
+        );
+        let cancelled = service
+            .handle(Request::call(3, SYNC_CANCEL, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(cancelled["state"], "idle");
+        assert!(
+            service
+                .engine
+                .lock()
+                .unwrap()
+                .interrupted_at_start(false)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Two unclean stops during it and the run it continued: it waits.
+        for _ in 0..2 {
+            interrupt(
+                &service,
+                id,
+                foldover_engine::WritingRun::Scheduled,
+                foldover_engine::Resume::Auto,
+                true,
+            );
+        }
+        let status = service
+            .handle(Request::call(4, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&status["state"], &status["resumes"]),
+            (&json!("interrupted"), &json!(false))
+        );
+        assert!(service.jobs.resumable().is_empty());
     }
 
     #[tokio::test]

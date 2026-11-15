@@ -50,16 +50,24 @@ pub struct JournalEntry {
 /// A run's writes, named by its archive folder, e.g.
 /// `2026-10-18T09-30-00.123Z_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Journal {
+pub struct RunJournal {
     pub run: String,
     pub entries: Vec<JournalEntry>,
+}
+
+/// What Undo reverts: the newest writing run, or an interrupted run and
+/// the runs that continued it (ADR 0055), oldest first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Journal {
+    pub runs: Vec<RunJournal>,
 }
 
 /// How a base update touches the journal.
 #[derive(Clone, Copy, Debug)]
 pub enum JournalUpdate<'a> {
     None,
-    /// Writes of `run`; its first batch replaces the previous run's.
+    /// Writes of `run`; its first batch replaces the previous run's,
+    /// unless `run` continues an interrupted one.
     Record {
         run: &'a str,
         entries: &'a [JournalEntry],
@@ -72,10 +80,8 @@ pub enum JournalUpdate<'a> {
         run: &'a str,
         seqs: &'a [u64],
     },
-    /// `run` was undone; its entries are spent.
-    Spend {
-        run: &'a str,
-    },
+    /// The journal's runs were undone; their entries are spent.
+    Spend,
 }
 
 impl PairStore {
@@ -103,7 +109,7 @@ impl PairStore {
                     .map_err(|_| Error::InvalidStored("journal sequence"))?;
                 JournalChange::Undid { run, seqs: &undone }
             }
-            JournalUpdate::Spend { run } => JournalChange::Spend { run },
+            JournalUpdate::Spend => JournalChange::Spend,
             JournalUpdate::Record { run, entries } => {
                 rows = entries.iter().map(row).collect::<Result<_, _>>()?;
                 JournalChange::Record { run, rows: &rows }
@@ -121,13 +127,18 @@ impl PairStore {
         Ok(self.database.automation_held(id.as_bytes())?)
     }
 
-    /// The pair's journaled run, if its newest writing run is not undone.
+    /// The pair's journaled runs, if its newest writing run is not undone.
     pub fn journal(&self, id: PairId) -> Result<Option<Journal>, Error> {
-        let Some((run, rows)) = self.database.journal(id.as_bytes())? else {
-            return Ok(None);
-        };
-        let entries = rows.into_iter().map(entry).collect::<Result<_, _>>()?;
-        Ok(Some(Journal { run, entries }))
+        let runs = self
+            .database
+            .journal(id.as_bytes())?
+            .into_iter()
+            .map(|(run, rows)| {
+                let entries = rows.into_iter().map(entry).collect::<Result<_, _>>()?;
+                Ok(RunJournal { run, entries })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok((!runs.is_empty()).then_some(Journal { runs }))
     }
 }
 

@@ -1,9 +1,10 @@
 //! The newest writing run's operations per pair, kept so that run can be
 //! undone. A run's first recorded batch replaces the previous run's
-//! entries; undoing a run spends them. Entries change only together with
-//! the base, in one transaction.
+//! entries, unless it continues an interrupted run (ADR 0055): then the
+//! journal holds that chain of runs, and undoing spends them all. Entries
+//! change only together with the base, in one transaction.
 
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{Database, Error};
 
@@ -41,10 +42,9 @@ pub enum JournalChange<'a> {
         run: &'a str,
         seqs: &'a [i64],
     },
-    /// `run` was undone; its entries are spent.
-    Spend {
-        run: &'a str,
-    },
+    /// The journal's runs were undone; their entries are spent, and an
+    /// interrupted run among them has nothing left to continue.
+    Spend,
 }
 
 /// The statements that drop every other run's entries when a run's
@@ -56,6 +56,13 @@ const REPLACE_OTHER_RUNS: [&str; 2] = [
     "DELETE FROM run_journal WHERE pair_id=?1 AND run<?2",
     "DELETE FROM run_journal WHERE pair_id=?1 AND run>?2",
 ];
+
+/// Whether the pair's running run continues the journal (`interrupted_run`).
+const CONTINUES: &str =
+    "SELECT keep_journal FROM interrupted_run WHERE pair_id=?1 AND state='running'";
+/// The running run wrote, so a run continuing it keeps its entries.
+const WROTE: &str =
+    "UPDATE interrupted_run SET wrote=1 WHERE pair_id=?1 AND state='running' AND wrote=0";
 
 pub(super) fn apply(
     transaction: &Transaction<'_>,
@@ -79,10 +86,11 @@ pub(super) fn apply(
             }
             Ok(())
         }
-        JournalChange::Spend { run } => {
+        JournalChange::Spend => {
+            transaction.execute("DELETE FROM run_journal WHERE pair_id=?1", params![pair])?;
             transaction.execute(
-                "DELETE FROM run_journal WHERE pair_id=?1 AND run=?2",
-                params![pair, run],
+                "DELETE FROM interrupted_run WHERE pair_id=?1",
+                params![pair],
             )?;
             Ok(())
         }
@@ -90,9 +98,18 @@ pub(super) fn apply(
             if rows.is_empty() {
                 return Ok(());
             }
-            for sql in REPLACE_OTHER_RUNS {
-                transaction.execute(sql, params![pair, run])?;
+            // A run continuing an interrupted one keeps that run's entries,
+            // so Undo covers both; the journal then holds only their chain.
+            let continues = transaction
+                .query_row(CONTINUES, params![pair], |row| row.get::<_, i64>(0))
+                .optional()?
+                .is_some_and(|keep| keep == 1);
+            if !continues {
+                for sql in REPLACE_OTHER_RUNS {
+                    transaction.execute(sql, params![pair, run])?;
+                }
             }
+            transaction.execute(WROTE, params![pair])?;
             let mut insert = transaction.prepare(
                 "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version,base_left,base_right,source)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -118,33 +135,37 @@ pub(super) fn apply(
 }
 
 impl Database {
-    /// The pair's journaled run and its entries in write order, if any.
-    pub fn journal(&self, pair: &[u8]) -> Result<Option<(String, Vec<JournalRow>)>, Error> {
+    /// The pair's journaled runs, oldest first, each with its entries in
+    /// write order. Run names begin with their start time, so name order
+    /// is start order.
+    pub fn journal(&self, pair: &[u8]) -> Result<Vec<(String, Vec<JournalRow>)>, Error> {
         let mut statement = self.connection.prepare(
             "SELECT run,seq,path,side,action,version,base_left,base_right,source FROM run_journal
-             WHERE pair_id=?1 AND run=(SELECT max(run) FROM run_journal WHERE pair_id=?1)
-             ORDER BY seq",
+             WHERE pair_id=?1 ORDER BY run,seq",
         )?;
-        let mut run = None;
-        let rows = statement
-            .query_map([pair], |row| {
-                run = Some(row.get::<_, String>(0)?);
-                let base = match (row.get(6)?, row.get(7)?) {
-                    (Some(left), Some(right)) => Some((left, right)),
-                    _ => None,
-                };
-                Ok(JournalRow {
-                    seq: row.get(1)?,
-                    path: row.get(2)?,
-                    side: row.get(3)?,
-                    action: row.get(4)?,
-                    version: row.get(5)?,
-                    base,
-                    source: row.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(run.map(|run| (run, rows)))
+        let mut runs: Vec<(String, Vec<JournalRow>)> = Vec::new();
+        let mut rows = statement.query([pair])?;
+        while let Some(row) = rows.next()? {
+            let run: String = row.get(0)?;
+            let base = match (row.get(6)?, row.get(7)?) {
+                (Some(left), Some(right)) => Some((left, right)),
+                _ => None,
+            };
+            let entry = JournalRow {
+                seq: row.get(1)?,
+                path: row.get(2)?,
+                side: row.get(3)?,
+                action: row.get(4)?,
+                version: row.get(5)?,
+                base,
+                source: row.get(8)?,
+            };
+            match runs.last_mut() {
+                Some((last, entries)) if *last == run => entries.push(entry),
+                _ => runs.push((run, vec![entry])),
+            }
+        }
+        Ok(runs)
     }
 }
 
@@ -153,6 +174,14 @@ mod tests {
     use super::super::tests::{location, values};
     use super::*;
     use crate::BaseChange;
+
+    /// The journal's newest run, as tests of single runs read it.
+    fn newest(
+        database: &Database,
+        pair: &[u8],
+    ) -> Result<Option<(String, Vec<JournalRow>)>, Error> {
+        Ok(database.journal(pair)?.pop())
+    }
 
     fn row(seq: i64, path: &[u8], action: &str) -> JournalRow {
         JournalRow {
@@ -233,7 +262,7 @@ mod tests {
         record(&mut database, &pair.id, "2026-10-20T10-00-00.000Z", &first).unwrap();
         record(&mut database, &pair.id, "2026-10-20T10-00-00.000Z", &second).unwrap();
         assert_eq!(
-            database.journal(&pair.id).unwrap().unwrap(),
+            newest(&database, &pair.id).unwrap().unwrap(),
             (
                 "2026-10-20T10-00-00.000Z".into(),
                 [first[0].clone(), first[1].clone(), second[0].clone()].to_vec()
@@ -242,7 +271,7 @@ mod tests {
 
         // An empty batch, even under a new run id, keeps the journal.
         record(&mut database, &pair.id, "2026-10-20T11-00-00.000Z", &[]).unwrap();
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 3);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1.len(), 3);
 
         // Another pair's journal is untouched by either run.
         let other_rows = [row(0, b"x", "create")];
@@ -254,27 +283,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            database.journal(&other.id).unwrap().unwrap(),
+            newest(&database, &other.id).unwrap().unwrap(),
             ("2026-10-20T09-00-00.000Z".into(), other_rows.to_vec())
         );
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 3);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1.len(), 3);
 
         // A new run replaces the previous run's entries, and a run whose
         // id sorts before the current one removes the newer run's too.
         let newer = [row(0, b"d", "metadata")];
         record(&mut database, &pair.id, "2026-10-20T12-00-00.000Z", &newer).unwrap();
         assert_eq!(
-            database.journal(&pair.id).unwrap().unwrap(),
+            newest(&database, &pair.id).unwrap().unwrap(),
             ("2026-10-20T12-00-00.000Z".into(), newer.to_vec())
         );
         let older = [row(0, b"e", "archive")];
         record(&mut database, &pair.id, "2026-10-20T09-00-00.000Z", &older).unwrap();
         assert_eq!(
-            database.journal(&pair.id).unwrap().unwrap(),
+            newest(&database, &pair.id).unwrap().unwrap(),
             ("2026-10-20T09-00-00.000Z".into(), older.to_vec())
         );
         assert_eq!(
-            database.journal(&other.id).unwrap().unwrap(),
+            newest(&database, &other.id).unwrap().unwrap(),
             ("2026-10-20T09-00-00.000Z".into(), other_rows.to_vec())
         );
     }
@@ -319,7 +348,7 @@ mod tests {
                 .is_err()
         );
         assert!(database.base_rows(&pair.id).unwrap().is_empty());
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, first);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1, first);
 
         // An invalid base row runs first and leaves the journal alone.
         assert!(
@@ -340,7 +369,7 @@ mod tests {
                 .is_err()
         );
         assert!(database.base_rows(&pair.id).unwrap().is_empty());
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, first);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1, first);
     }
 
     #[test]
@@ -361,7 +390,7 @@ mod tests {
         };
         let moved = row(0, b"new/a", "move");
         record(&mut database, std::slice::from_ref(&moved)).unwrap();
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1, [moved]);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1, [moved]);
 
         let mut sourceless = row(1, b"b", "move");
         sourceless.source = None;
@@ -405,7 +434,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (run, rows) = database.journal(&pair.id).unwrap().unwrap();
+        let (run, rows) = newest(&database, &pair.id).unwrap().unwrap();
         assert_eq!(run, "2026-10-19T10-00-00.000Z");
         assert_eq!(rows, [first[0].clone(), first[1].clone(), more[0].clone()]);
 
@@ -423,7 +452,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (_, rows) = database.journal(&pair.id).unwrap().unwrap();
+        let (_, rows) = newest(&database, &pair.id).unwrap().unwrap();
         assert_eq!(rows, [first[0].clone(), more[0].clone()]);
         database
             .change_base(
@@ -450,7 +479,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(database.journal(&pair.id).unwrap().unwrap().1.len(), 3);
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1.len(), 3);
         let later = [row(0, b"d", "metadata")];
         database
             .change_base(
@@ -464,34 +493,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            database.journal(&pair.id).unwrap().unwrap(),
+            newest(&database, &pair.id).unwrap().unwrap(),
             ("2026-10-19T12-00-00.000Z".into(), later.to_vec())
         );
 
         // A stale revision changes neither base nor journal.
         assert!(
             database
-                .change_base(
-                    &pair.id,
-                    2,
-                    &[],
-                    JournalChange::Spend {
-                        run: "2026-10-19T12-00-00.000Z"
-                    }
-                )
+                .change_base(&pair.id, 2, &[], JournalChange::Spend)
                 .is_err()
         );
         database
-            .change_base(
-                &pair.id,
-                1,
-                &[],
-                JournalChange::Spend {
-                    run: "2026-10-19T12-00-00.000Z",
-                },
-            )
+            .change_base(&pair.id, 1, &[], JournalChange::Spend)
             .unwrap();
-        assert_eq!(database.journal(&pair.id).unwrap(), None);
+        assert_eq!(newest(&database, &pair.id).unwrap(), None);
 
         // Rows that break the schema's rules are refused.
         let mut invalid = row(0, b"e", "archive");

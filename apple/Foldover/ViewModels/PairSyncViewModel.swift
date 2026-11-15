@@ -227,6 +227,17 @@ struct PairSyncViewModel {
         if case .working(_, let cancelling, _, _) = state { return !cancelling }
         return false
     }
+    /// What declines an interrupted sync, so nothing continues it; nil
+    /// when none was interrupted.
+    var declineTitle: String? {
+        guard case .interrupted(_, let resumes) = state else { return nil }
+        return resumes ? String(localized: "Don’t Resume") : String(localized: "Dismiss")
+    }
+    /// Decline the interrupted sync: the agent forgets it.
+    func decline() async {
+        guard declineTitle != nil else { return }
+        await store.cancel(pair.id)
+    }
     var requestError: String? { store.requestError(for: pair.id) }
 
     /// How the pair reads at a glance in the sidebar and the menu bar.
@@ -239,6 +250,9 @@ struct PairSyncViewModel {
             return .waiting
         case .failed:
             return .attention
+        // One that continues by itself needs no one.
+        case .interrupted(_, let resumes):
+            return resumes ? .idle : .attention
         case .needsApproval:
             return reviewable == nil ? .idle : .attention
         case .previewed(let preview):
@@ -315,6 +329,10 @@ struct PairSyncViewModel {
         case .waiting(let side):
             return PairPlaceholder(title: String(localized: "\(Self.folderName(side)) Isn't Connected"),
                                    symbol: "externaldrive.badge.xmark", message: statusText, action: nil)
+        case .interrupted:
+            return PairPlaceholder(title: String(localized: "Sync Interrupted"),
+                                   symbol: "arrow.clockwise.circle", message: statusText,
+                                   action: .preview)
         case .working:
             return nil
         }
@@ -347,6 +365,8 @@ struct PairSyncViewModel {
         case .undone: String(localized: "Undone")
         case .failed: String(localized: "Stopped")
         case .waiting: String(localized: "Waiting for folder")
+        case .interrupted(_, let resumes):
+            resumes ? String(localized: "Continues soon") : String(localized: "Interrupted")
         }
     }
 
@@ -385,6 +405,11 @@ struct PairSyncViewModel {
             return String(localized: "Sync stopped: \(message)")
         case .waiting(let side):
             return String(localized: "\(Self.folderName(side)) is not connected. Automatic syncs resume when its disk or share is back.")
+        case .interrupted(let started, let resumes):
+            let when = started.formatted(date: .abbreviated, time: .shortened)
+            return resumes
+                ? String(localized: "The sync that started \(when) stopped when Foldover’s background agent did, for example at a restart. It continues by itself; what it already did is kept.")
+                : String(localized: "The sync that started \(when) stopped when Foldover’s background agent did, for example at a restart. Sync again to finish it; what it already did is kept.")
         }
     }
 

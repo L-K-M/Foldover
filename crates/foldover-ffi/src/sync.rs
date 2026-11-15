@@ -236,6 +236,14 @@ pub enum SyncJobState {
     Waiting {
         side: SyncSide,
     },
+    /// The agent stopped while the pair's sync ran (ADR 0055).
+    /// `started_ms` is when that sync started; with `resumes`, the pair
+    /// continues it by itself, otherwise the next sync does. Cancelling
+    /// declines it.
+    Interrupted {
+        started_ms: u64,
+        resumes: bool,
+    },
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -461,6 +469,10 @@ impl From<SyncStatus> for SyncJobState {
             SyncStatus::Failed { message } => Self::Failed { message },
             SyncStatus::Waiting { side: waiting } => Self::Waiting {
                 side: side(waiting),
+            },
+            SyncStatus::Interrupted { started, resumes } => Self::Interrupted {
+                started_ms: started,
+                resumes,
             },
         }
     }

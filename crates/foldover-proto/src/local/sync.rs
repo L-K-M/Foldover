@@ -364,6 +364,14 @@ pub enum SyncStatus {
     Waiting {
         side: super::PairSide,
     },
+    /// The agent stopped while the pair's sync ran, e.g. for a restart
+    /// (ADR 0055); `started` is when that sync started, in milliseconds
+    /// since the Unix epoch. With `resumes`, the pair continues it by
+    /// itself; otherwise the next sync does. Cancelling declines it.
+    Interrupted {
+        started: u64,
+        resumes: bool,
+    },
 }
 
 #[cfg(test)]
@@ -409,6 +417,20 @@ mod tests {
                 "right_root": b"sftp://nas/right",
                 "mode": {"kind": "backup", "source": "left"},
             })
+        );
+        assert_eq!(serde_json::from_value::<SyncStatus>(value).unwrap(), status);
+    }
+
+    #[test]
+    fn interrupted_status_names_its_start_and_whether_it_resumes() {
+        let status = SyncStatus::Interrupted {
+            started: 1_700_000_000_123,
+            resumes: true,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"state": "interrupted", "started": 1_700_000_000_123_u64, "resumes": true})
         );
         assert_eq!(serde_json::from_value::<SyncStatus>(value).unwrap(), status);
     }

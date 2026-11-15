@@ -30,6 +30,27 @@ final class FoldTourTests: XCTestCase {
                       "Keyboard selection must work on completed failures")
     }
 
+    /// A sync the agent stopped during, as at a restart, says so and how
+    /// it finishes; declining it from the sidebar leaves the pair ready.
+    @MainActor
+    func testAnInterruptedSyncExplainsItselfAndCanBeDismissed() {
+        let tour = Tour(self, appearance: .light, scenario: "interrupted")
+        let app = tour.app
+        tour.launch()
+        defer { app.terminate() }
+        let row = app.outlines.firstMatch.staticTexts["Photos"].firstMatch
+        tour.click(row, "Photos in the sidebar")
+        XCTAssertTrue(app.windows.staticTexts["Sync Interrupted"].firstMatch.waitForExistence(timeout: 5),
+                      "An interrupted sync must say so")
+        tour.snap("pair-interrupted")
+        row.rightClick()
+        let dismiss = app.menuItems["Dismiss"].firstMatch
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 5), "The sidebar menu must offer Dismiss")
+        dismiss.click()
+        XCTAssertTrue(app.windows.staticTexts["No Preview Yet"].firstMatch.waitForExistence(timeout: 5),
+                      "Dismissing must leave the pair ready")
+    }
+
     /// A window opened on a run already under way, as after a schedule
     /// or the menu bar started it: nothing was previewed, so nothing is
     /// listed. The leaf still lies over a whole page, its back reading

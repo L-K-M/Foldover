@@ -61,6 +61,9 @@ struct PairSidebar: View {
                 .disabled(!sync.canSync)
             Button("Stop") { Task { await sync.cancel() } }
                 .disabled(!sync.canCancel)
+            if let declineTitle = sync.declineTitle {
+                Button(declineTitle) { Task { await sync.decline() } }
+            }
             if pair.automation == .paused {
                 Button("Resume Pair") { Task { await viewModel.toggleAutomation(of: pair) } }
                     .disabled(!viewModel.canChangeAutomation(of: pair))

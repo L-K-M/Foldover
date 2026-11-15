@@ -1,0 +1,103 @@
+# ADR 0055: Interrupted runs
+
+Status: Implemented for scheduled runs; a person's runs wait for the next
+sync until manual-pair resume lands
+([plan](../resume-interrupted-runs.md), W3)
+
+## Context
+
+A run the agent stops during, for example at a restart, loses no
+committed work: base and journal batches commit every 256 entries
+(ADR 0020), and the next run finds finished work equal on both sides.
+But the run itself was gone:
+
+- Job state lives in memory, and only finished runs are recorded
+  (ADR 0026). After a restart the pair read "Ready", with nothing saying
+  a sync stopped halfway.
+- A scheduled run's trigger survived by accident: it left no history
+  row, so its interval or daily moment still looked missed. A person's
+  sync waited for the person, who had no reason to know.
+- The next run's first journal batch replaced the stopped run's journal
+  (ADR 0029). Undo then covered only the second half of the work, and
+  the first half could no longer be backed out.
+- Nothing bounded a run that crashes the agent every time: crash-loop
+  safe mode needs three unclean stops within five minutes, and launchd
+  restarts the agent after 30 s, so a crash more than about two minutes
+  into a run would repeat forever once runs resume by themselves.
+
+Two designs were reviewed and rejected:
+
+- **An unfinished history row as the marker.** `run_history.finished_ms`
+  is `NOT NULL`, the outcome is an enumeration every reader decodes, and
+  the scheduler reads the newest row as the last run. The row would need
+  a schema rebuild, a raised minimum reader, a new outcome in every
+  layer, and rules for closing rows a newer run supersedes.
+- **Continuing the stopped run under its name.** The name is minted
+  inside the run, after observing, so a run stopped while observing has
+  none to continue. Reusing one needs the journal's sequence seeded,
+  the bandwidth limit kept, and a policy for archive collisions: archive
+  moves never overwrite, and a local replace places the new content
+  before it archives the old.
+
+## Decision
+
+- **One row per pair** (`interrupted_run`, schema v31). A writing run, a
+  person's sync or a scheduled one, is admitted when it starts: under
+  the engine lock, in `Jobs::start`, with the same start time its history
+  row gets. Admitting replaces the row of the run before, so no older
+  run's row outlives a newer one. Previews and undos are not admitted.
+- **Every result ends it.** When a job's result publishes, after any
+  panic is caught: a finished run, or one a person cancelled, deletes the
+  row; any other result (needs approval, failed, crashed) marks it
+  `ended`, so the next run still continues its journal but nothing
+  resumes it. Only a run the agent never saw end stays `running`.
+- **A start finds it.** At an agent start, before the scheduler runs,
+  every `running` row becomes `interrupted` and the pair's status is
+  `interrupted` (local protocol 24), with when the run started and
+  whether it continues by itself. The agent keeps its runtime lock until
+  the process exits, after the runtime has waited for a sync still
+  running, so no second agent can find that sync's row.
+- **Continuing it.** A scheduled run continues by itself: the scheduler
+  treats the pair as due at its first tick, through the same holds as
+  every automatic sync (safe mode, the global pause, pair pauses, the
+  hold after an undo, Low Power Mode and costly networks). A person's
+  sync waits for the next sync. Cancelling an interrupted pair declines
+  it: the row is deleted and nothing continues it.
+- **Undo covers the chain.** A run continuing one that wrote, or that
+  itself continued one, keeps the journal: its first batch leaves the
+  earlier runs' entries in place. Each run keeps its own name and archive
+  folder. Undo reverts every run left in the journal, newest first, each
+  entry from its own run's archive, and spends them all. Run names begin
+  with their start time, so name order is start order.
+- **Bounds.**
+  - A journal whose oldest run started more than the archive retention
+    minus a day ago (29 days) starts afresh: the continuing run prunes
+    archive folders older than 30 days when it finishes, and Undo could
+    no longer put back what the oldest one held.
+  - Starts after an unclean stop count against the row, and a run
+    continuing an interrupted one inherits the count. After two, the run
+    no longer continues by itself and waits for a person. Clean stops,
+    including reboots, never count.
+  - Activating a saved edit that changes roots or metadata categories
+    deletes the row with the base and journal: nothing is left to
+    continue.
+
+## Consequences
+
+- After a restart, a pair whose sync stopped says so, in the app (the
+  sidebar menu offers Don't Resume or Dismiss), the CLI and
+  `sync.status`.
+- A scheduled backup continues at once instead of at its next interval,
+  and Undo after it reverts the whole logical sync.
+- A path written by both an interrupted run and the run continuing it
+  goes back only to the first run's version, and is listed as changed
+  since the sync: Undo judges every entry against the observation it
+  took before reverting anything.
+- The continued run's history row counts only its own work; the stopped
+  run's counts were in memory.
+- Older agents ignore the table: they replace the journal as before and
+  show no interrupted run.
+- Still open, in the plan: manual pairs that continue by themselves
+  (`Work::Resume`, the owner's decision of 2026-11-15), and the
+  re-observation cost, which for SFTP folders means reading every remote
+  file again (W1, W2).

@@ -1,4 +1,5 @@
-//! Undo the newest writing run (ADR 0029, PLAN.md §3.8). What it created
+//! Undo the newest writing run (ADR 0029, PLAN.md §3.8), or an interrupted
+//! run and the runs that continued it, newest first (ADR 0055). What it created
 //! goes to a new archive run; what it replaced or archived comes back from
 //! its archive. Each entry is undone only while its path still holds what
 //! the run left there; anything else is listed, never forced. Undone paths
@@ -72,8 +73,8 @@ const OCCUPIED: &str = "Something new holds the path it moved from; left as it i
 const UNREADABLE: &str = "This path or a related folder could not be read; left unchanged";
 
 impl PairRun {
-    /// Undo `journal`, the pair's newest writing run. The run's roots must
-    /// still be the recorded ones.
+    /// Undo `journal`, the pair's newest writing run or chain of runs. The
+    /// runs' roots must still be the recorded ones.
     pub fn undo(
         self,
         journal: Journal,
@@ -118,7 +119,19 @@ impl PairRun {
         };
         let mut put_back: Vec<(Side, SyncPath)> = Vec::new();
         let mut folders: Vec<&JournalEntry> = Vec::new();
-        let entries: Vec<&JournalEntry> = journal.entries.iter().rev().collect();
+        // Newest run first, each in reverse write order; every entry
+        // comes back from its own run's archive.
+        let entries: Vec<(&str, &JournalEntry)> = journal
+            .runs
+            .iter()
+            .rev()
+            .flat_map(|run| {
+                run.entries
+                    .iter()
+                    .rev()
+                    .map(|entry| (run.run.as_str(), entry))
+            })
+            .collect();
 
         // Each batch commits its base restores — and the hold that keeps
         // scheduled runs from redoing the undo — before changing a file.
@@ -132,7 +145,7 @@ impl PairRun {
             }
             self.check_roots(identities)?;
             let mut steps = Vec::new();
-            for entry in batch {
+            for &(run, entry) in batch {
                 let step = match self.plan_undo(entry) {
                     Ok(step) => step,
                     Err(message) => {
@@ -150,20 +163,20 @@ impl PairRun {
                     folders.push(entry);
                     continue;
                 }
-                steps.push((*entry, step));
+                steps.push((run, entry, step));
             }
             if steps.is_empty() {
                 continue;
             }
             let restores: Vec<BaseUpdate> = steps
                 .iter()
-                .filter(|(_, step)| *step != Step::PutBackBeside)
-                .flat_map(|(entry, _)| restore(entry))
+                .filter(|(_, _, step)| *step != Step::PutBackBeside)
+                .flat_map(|(_, entry, _)| restore(entry))
                 .collect();
             commit(revision, Commit::Undoing { updates: &restores }).map_err(RunError::Commit)?;
-            let mut undid = Vec::new();
-            for (entry, step) in steps {
-                match self.undo_entry(entry, step, &journal.run, &scope, control) {
+            let mut undid: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+            for (run, entry, step) in steps {
+                match self.undo_entry(entry, step, run, &scope, control) {
                     Ok(Placed::AtPath) if step == Step::Remove => report.removed += 1,
                     Ok(Placed::AtPath) => {
                         report.restored += 1;
@@ -179,16 +192,15 @@ impl PairRun {
                         continue;
                     }
                 }
-                undid.push(entry.seq);
+                undid.entry(run).or_default().push(entry.seq);
             }
             // Undoing again after a cancel or crash skips these; without
             // this, a retry finds them back and lists each as changed or
             // no longer archived.
-            let undid = Commit::Undid {
-                run: &journal.run,
-                seqs: &undid,
-            };
-            commit(revision, undid).map_err(RunError::Commit)?;
+            for (run, seqs) in &undid {
+                let undid = Commit::Undid { run, seqs };
+                commit(revision, undid).map_err(RunError::Commit)?;
+            }
         }
 
         if let Some(error) = leases.failure() {
@@ -223,10 +235,7 @@ impl PairRun {
         // A finished undo spends the journal; a cancelled one keeps it, so
         // undoing again picks up what is left.
         if report.completion == Completion::Finished {
-            let last = Commit::Undone {
-                run: &journal.run,
-                updates: &refilled,
-            };
+            let last = Commit::Undone { updates: &refilled };
             commit(revision, last).map_err(RunError::Commit)?;
         }
         Ok(report)

@@ -4523,6 +4523,14 @@ public enum SyncJobState: Equatable, Hashable {
      */
     case waiting(side: SyncSide
     )
+    /**
+     * The agent stopped while the pair's sync ran (ADR 0055).
+     * `started_ms` is when that sync started; with `resumes`, the pair
+     * continues it by itself, otherwise the next sync does. Cancelling
+     * declines it.
+     */
+    case interrupted(startedMs: UInt64, resumes: Bool
+    )
 
 
 
@@ -4565,6 +4573,9 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         )
         
         case 8: return .waiting(side: try FfiConverterTypeSyncSide.read(from: &buf)
+        )
+        
+        case 9: return .interrupted(startedMs: try FfiConverterUInt64.read(from: &buf), resumes: try FfiConverterBool.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -4615,6 +4626,12 @@ public struct FfiConverterTypeSyncJobState: FfiConverterRustBuffer {
         case let .waiting(side):
             writeInt(&buf, Int32(8))
             FfiConverterTypeSyncSide.write(side, into: &buf)
+            
+        
+        case let .interrupted(startedMs,resumes):
+            writeInt(&buf, Int32(9))
+            FfiConverterUInt64.write(startedMs, into: &buf)
+            FfiConverterBool.write(resumes, into: &buf)
             
         }
     }

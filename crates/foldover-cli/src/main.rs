@@ -1038,7 +1038,8 @@ fn changes_exit_code(status: &SyncStatus) -> ExitCode {
         | SyncStatus::Finished { .. }
         | SyncStatus::Undone { .. }
         | SyncStatus::Failed { .. }
-        | SyncStatus::Waiting { .. } => ExitCode::SUCCESS,
+        | SyncStatus::Waiting { .. }
+        | SyncStatus::Interrupted { .. } => ExitCode::SUCCESS,
     }
 }
 

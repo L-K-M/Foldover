@@ -798,12 +798,16 @@ impl Service {
             Effort::Gentle => 0,
         };
         self.scheduler.order_by_wait(&mut candidates);
+        // A scheduled run the agent stopped during continues at the first
+        // chance its holds allow (ADR 0055).
+        let resumable = self.jobs.resumable();
         let mut started = Vec::new();
         for pair in candidates {
             let recorded = last_run.get(&pair.id()).copied();
-            let due = self
-                .scheduler
-                .due(&pair, now, local_now, recorded.and_then(local_time))
+            let due = resumable.contains(&pair.id())
+                || self
+                    .scheduler
+                    .due(&pair, now, local_now, recorded.and_then(local_time))
                 || self.scheduler.interval_passed(&pair, recorded);
             if held.contains(&pair.id()) || !due {
                 continue;

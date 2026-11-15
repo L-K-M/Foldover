@@ -261,7 +261,9 @@ scope is in [ADR 0011](docs/adr/0011-pair-configuration-api.md).
 - **Lifecycle:**
   - App quit → sync continues.
   - Agent crash → launchd restarts it; journal recovery runs before any new
-    work.
+    work. A run it stopped during shows as interrupted; a scheduled one
+    continues by itself, a person's waits for the next sync
+    ([ADR 0055](docs/adr/0055-interrupted-runs.md)).
   - App update → the version handshake detects the mismatch and the agent
     restarts onto the new binary.
   - Downgrade → the state DB records a minimum reader version. An older agent
@@ -492,6 +494,7 @@ Local entry versions (content and tracked metadata): [ADR 0018](docs/adr/0018-lo
 Pure deletion-review thresholds: [ADR 0013](docs/adr/0013-deletion-review-fuse.md).
 Run execution, approvals and journal-free recovery: [ADR 0020](docs/adr/0020-run-execution.md).
 Run journal and Undo: [ADR 0029](docs/adr/0029-undo.md).
+Interrupted runs and journals that span them: [ADR 0055](docs/adr/0055-interrupted-runs.md).
 Name clashes between spellings a folder treats as one: [ADR 0030](docs/adr/0030-name-clashes.md).
 Hierarchy-aware candidate generation is implemented below the agent API;
 [ADR 0014](docs/adr/0014-tree-plan-candidates.md) records tree validation,

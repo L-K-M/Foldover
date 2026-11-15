@@ -240,6 +240,11 @@ enum PairSyncState: Equatable, Sendable {
     case failed(String)
     /// An automatic sync waits for this folder, e.g. an unmounted disk.
     case waiting(FolderSide)
+    /// The background agent stopped while the sync that began at
+    /// `started` ran, e.g. for a restart (ADR 0055). With `resumes`, the
+    /// pair continues it by itself; otherwise the next sync does. What it
+    /// already did is kept either way; cancelling declines it.
+    case interrupted(started: Date, resumes: Bool)
 }
 
 protocol SyncClient: Sendable {
@@ -380,6 +385,9 @@ private actor CoreSyncClient: SyncClient {
         case .undone(let result): .undone(summary(result))
         case .failed(let message): .failed(message)
         case .waiting(let folder): .waiting(side(folder))
+        case .interrupted(let startedMs, let resumes):
+            .interrupted(started: Date(timeIntervalSince1970: TimeInterval(startedMs) / 1_000),
+                         resumes: resumes)
         }
     }
 
