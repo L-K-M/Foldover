@@ -299,6 +299,10 @@ const RACY_WINDOW: Duration = Duration::from_secs(3);
 /// a week (PLAN.md §4.8). Each entry's share is spread by its stat, so a
 /// large folder is not reread in one run.
 const REREAD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How long before it was read a remote file must have been modified for
+/// its stat to prove its version: the server's clock may differ from this
+/// Mac's by anything less (owner decision, 2026-11-15; ADR 0057).
+const REMOTE_SETTLED: Duration = Duration::from_secs(60 * 60);
 
 /// The exact stat a version was derived from. An identical later stat proves
 /// the version unchanged without rereading data, outside the racy window.
@@ -343,6 +347,26 @@ impl Fingerprint {
     /// Whether this fingerprint records the stat `key` of `size` bytes.
     pub(crate) fn same_stat(&self, key: &[u8], size: u64) -> bool {
         self.key.matches(key) && self.size == size
+    }
+
+    /// Whether a remote stat `key` of `size` bytes, last modified at
+    /// `modified` by the server's clock, proves this version (ADR 0057).
+    /// The key holds no file identity or change time, and the clocks
+    /// differ, so the file must have been modified more than
+    /// `REMOTE_SETTLED` before it was read.
+    pub(crate) fn proves_remote_unchanged(
+        &self,
+        key: &[u8],
+        size: u64,
+        modified: SystemTime,
+    ) -> bool {
+        let settled = self
+            .observed_at
+            .duration_since(modified)
+            .is_ok_and(|age| age > REMOTE_SETTLED);
+        settled
+            && self.same_stat(key, size)
+            && self.read_within(self.reread_after(), SystemTime::now())
     }
 
     fn proves_unchanged_by(&self, key: &[u8], modified: SystemTime) -> bool {
@@ -730,7 +754,7 @@ impl Observation {
         self.pending.push(path, entry);
     }
 
-    fn reuse(&mut self, path: SyncPath, known: Arc<ObservedEntry>) {
+    pub(crate) fn reuse(&mut self, path: SyncPath, known: Arc<ObservedEntry>) {
         if let Some(recycled) = &self.recycled {
             recycled
                 .lock()

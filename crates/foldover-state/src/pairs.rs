@@ -505,6 +505,7 @@ impl PairStore {
         updates: &[BaseUpdate],
         journal: foldover_db::JournalChange<'_>,
         observed: &[(Side, SnapshotEntry)],
+        forgotten: &[(Side, SyncPath)],
     ) -> Result<(), Error> {
         let encoded: Vec<_> = updates
             .iter()
@@ -540,12 +541,17 @@ impl PairStore {
                 )
             })
             .collect();
+        let forgotten: Vec<_> = forgotten
+            .iter()
+            .map(|(side, path)| (side_name(*side), path.as_bytes()))
+            .collect();
         self.database.change_base_observed(
             id.as_bytes(),
             revision,
             &changes,
             journal,
             &observed,
+            &forgotten,
         )?;
         Ok(())
     }

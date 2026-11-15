@@ -47,7 +47,7 @@ use crate::observation_cache::Cache;
 use crate::observation_reads::Reads;
 use crate::{
     ApplyError, ArchivedItem, ArchivedRun, Filter, ListedEntry, ListedKind, NodeKind, Observation,
-    ObserveStep, ObservedEntry, RunScope, ScanError,
+    ObserveStep, ObservedEntry, RunScope, ScanError, StatTrust,
 };
 
 /// Foldover's own folders and files.
@@ -480,8 +480,9 @@ impl SftpEndpoint {
         }
     }
 
-    /// Reobserve contents and link targets: SFTP stat cannot prove they
-    /// stayed unchanged, even when size and modification time match.
+    /// Reobserve contents and link targets. SFTP stat holds no file
+    /// identity or change time, so it proves a file unchanged only where
+    /// `trust` allows (ADR 0057); link targets are always read again.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_owned(
         &self,
@@ -491,12 +492,21 @@ impl SftpEndpoint {
         base: std::sync::Arc<foldover_types::PathMap<foldover_types::BaselineEntry>>,
         side: foldover_types::Side,
         hints: crate::ObservationHints,
+        trust: StatTrust,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
     ) -> Result<Observation, ScanError> {
         let (observation, previous) =
             Observation::recycling_with_hints(previous, base, side, hints);
-        self.observe_cached(policy, filter, &previous, observation, control, progress)
+        self.observe_cached(
+            policy,
+            filter,
+            &previous,
+            trust,
+            observation,
+            control,
+            progress,
+        )
     }
 
     pub fn observe_from(
@@ -528,6 +538,7 @@ impl SftpEndpoint {
             policy,
             filter,
             &Cache::Borrowed(previous),
+            StatTrust::Read,
             Observation::default(),
             control,
             progress,
@@ -540,6 +551,7 @@ impl SftpEndpoint {
         policy: MetadataPolicy,
         filter: &Filter,
         previous: &Cache<'_>,
+        trust: StatTrust,
         observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
@@ -549,12 +561,21 @@ impl SftpEndpoint {
             None => NonZeroUsize::MIN,
         };
         if workers == NonZeroUsize::MIN {
-            self.observe_reporting_serial(policy, filter, previous, observation, control, progress)
+            self.observe_reporting_serial(
+                policy,
+                filter,
+                previous,
+                trust,
+                observation,
+                control,
+                progress,
+            )
         } else {
             self.observe_reporting_overlapped(
                 policy,
                 filter,
                 previous,
+                trust,
                 observation,
                 control,
                 progress,
@@ -564,11 +585,13 @@ impl SftpEndpoint {
     }
 
     /// The walk and its reads on this thread, one entry at a time.
+    #[allow(clippy::too_many_arguments)]
     fn observe_reporting_serial(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
         previous: &Cache<'_>,
+        trust: StatTrust,
         mut observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
@@ -578,12 +601,14 @@ impl SftpEndpoint {
             policy,
             filter,
             previous,
+            trust,
             &mut observation,
             &mut unavailable,
             control,
             progress,
             |path, attributes, observation, unavailable, progress, mut control| {
-                let entry = self.observe_entry(&path, &attributes, previous, policy, &mut control);
+                let entry =
+                    self.observe_entry(&path, &attributes, previous, policy, trust, &mut control);
                 record(observation, unavailable, &path, entry)?;
                 progress(ObserveStep::Checked);
                 Ok(())
@@ -605,6 +630,7 @@ impl SftpEndpoint {
         policy: MetadataPolicy,
         filter: &Filter,
         previous: &Cache<'_>,
+        trust: StatTrust,
         mut observation: Observation,
         control: &mut impl FnMut() -> ScanControl,
         progress: &mut impl FnMut(ObserveStep),
@@ -614,7 +640,7 @@ impl SftpEndpoint {
         let stop = AtomicBool::new(false);
         let read = |(path, attributes): &(SyncPath, Attributes),
                     asked: &dyn Fn() -> ScanControl| {
-            self.observe_entry(path, attributes, previous, policy, &mut || asked())
+            self.observe_entry(path, attributes, previous, policy, trust, &mut || asked())
         };
         let (walked, finish_reads) = thread::scope(|threads| {
             let mut pending = Reads::start(threads, workers, self.effort, &stop, &read);
@@ -622,6 +648,7 @@ impl SftpEndpoint {
                 policy,
                 filter,
                 previous,
+                trust,
                 &mut observation,
                 &mut unavailable,
                 control,
@@ -660,13 +687,15 @@ impl SftpEndpoint {
 
     /// Walk the tree, streaming one listing batch at a time. `submit`
     /// verifies a listed file on this thread or on the reader pool; a
-    /// directory settles here, needing no server request.
+    /// directory settles here, needing no server request, and so does a
+    /// file whose stat `trust` lets prove its stored version.
     #[allow(clippy::too_many_arguments)] // One walk, one handoff, one settle.
     fn walk_observation(
         &self,
         policy: MetadataPolicy,
         filter: &Filter,
         previous: &Cache<'_>,
+        trust: StatTrust,
         observation: &mut Observation,
         unavailable: &mut PathPrefixIndex,
         control: &mut impl FnMut() -> ScanControl,
@@ -733,10 +762,14 @@ impl SftpEndpoint {
                     if control() == ScanControl::Cancel {
                         return Err(ScanError::Cancelled);
                     }
-                    let entry = self.observe_entry(&path, &attributes, previous, policy, control);
+                    let entry =
+                        self.observe_entry(&path, &attributes, previous, policy, trust, control);
                     record(observation, unavailable, &path, entry)?;
                     progress(ObserveStep::Checked);
                     directories.push(Some(path));
+                } else if let Some(known) = reusable(&path, &attributes, previous, trust) {
+                    observation.reuse(path, known);
+                    progress(ObserveStep::Checked);
                 } else {
                     submit(
                         path,
@@ -773,6 +806,7 @@ impl SftpEndpoint {
         attributes: &Attributes,
         previous: &Cache<'_>,
         policy: MetadataPolicy,
+        trust: StatTrust,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<ObservedEntry, ScanError> {
         let key = stat_key(attributes);
@@ -781,9 +815,12 @@ impl SftpEndpoint {
         let version = self.version(path, attributes, policy, control)?;
 
         // Read again and found the same: the stored observation stands, so
-        // the snapshot has nothing to rewrite for this entry. The older
-        // time misleads nobody, since SFTP versions are never reused unread.
-        if let Some(known) = previous.get(path)
+        // the snapshot has nothing to rewrite for this entry. Only a regular
+        // file where stats are trusted records the confirming read's time,
+        // so a fingerprint too fresh or too old to trust can prove the file
+        // next run (ADR 0057); folders and links are never proved by stat.
+        if (trust == StatTrust::Read || attributes.kind() != FileKind::File)
+            && let Some(known) = previous.get(path)
             && known.version() == version
             && known.fingerprint().same_stat(&key, size)
         {
@@ -1947,6 +1984,28 @@ fn classify_listing_entry(
         return Ok(None);
     }
     Ok(Some((path, attributes)))
+}
+
+/// The stored observation of the regular file at `path`, when `trust`
+/// lets its listed stat prove it unchanged (ADR 0057). The stat must carry
+/// both size and modification time: `stat_key` writes placeholders for
+/// missing ones, which would match each other. Link targets are always
+/// read: a same-length retarget can keep every listed field.
+fn reusable(
+    path: &SyncPath,
+    attributes: &Attributes,
+    previous: &Cache<'_>,
+    trust: StatTrust,
+) -> Option<std::sync::Arc<ObservedEntry>> {
+    if trust != StatTrust::Reuse || attributes.kind() != FileKind::File {
+        return None;
+    }
+    let (size, _) = attributes.size.zip(attributes.modified())?;
+    let known = previous.get(path)?;
+    known
+        .fingerprint()
+        .proves_remote_unchanged(&stat_key(attributes), size, modified(attributes))
+        .then_some(known)
 }
 
 /// Keep what observing `path` found, or skip it when its error allows.

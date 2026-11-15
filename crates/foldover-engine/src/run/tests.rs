@@ -1583,6 +1583,7 @@ fn captured_run_inputs_decode_like_the_wrapper() {
                 )],
                 journal: &[],
                 observed: &[],
+                forgotten: &[],
             },
         )
         .unwrap();
@@ -1671,6 +1672,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
                 )],
                 journal: &[],
                 observed: &[],
+                forgotten: &[],
             },
         )
         .unwrap();
@@ -1707,6 +1709,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
                 updates: &[],
                 journal: &[],
                 observed: &[],
+                forgotten: &[],
             },
         ),
         Err(crate::Error::StaleRevision)
@@ -1745,6 +1748,7 @@ fn captured_inputs_survive_pair_removal() {
                 )],
                 journal: &[],
                 observed: &[],
+                forgotten: &[],
             },
         )
         .unwrap();
@@ -2074,16 +2078,28 @@ fn failed_writes_skip_only_their_own_subtrees() {
     // Prepare, then occupy the new folder's path so its creation fails.
     let prepared = pair.prepare();
     fs::write(right.join("a"), b"blocker").unwrap();
+    let mut forgotten = Vec::new();
     let outcome = prepared
         .execute(
             Approval::default(),
             RunContext::Reviewed,
             STARTED,
-            &mut |_, _| Ok(()),
+            &mut |_, commit| {
+                if let Commit::Base {
+                    forgotten: paths, ..
+                } = commit
+                {
+                    forgotten.extend_from_slice(paths);
+                }
+                Ok(())
+            },
             &mut proceed,
             &NoProgress,
         )
         .unwrap();
+    // ADR 0057: the failed path's stored observation goes, so the next run
+    // reads it instead of trusting a stat the failure contradicted.
+    assert_eq!(forgotten, [(Side::Right, path(b"a"))]);
     let RunOutcome::Ran(report) = outcome else {
         panic!("expected a run");
     };
@@ -4586,4 +4602,59 @@ fn a_preview_outlives_its_prepared_run() {
             .collect::<Vec<_>>(),
         versions
     );
+}
+
+/// ADR 0057: only a record-keeping Backup's or Mirror's target, which only
+/// Foldover writes, trusts remote stats.
+#[test]
+fn only_record_keeping_targets_trust_remote_stats() {
+    let draft = |mode, records| {
+        let directory = tempfile::tempdir().unwrap();
+        PairDraft::new(
+            "Pair".into(),
+            root(&directory.path().join("left")),
+            root(&directory.path().join("right")),
+            mode,
+        )
+        .unwrap()
+        .with_options(PairOptions::default().with_records(records))
+    };
+    let backup = SyncMode::Backup { source: Side::Left };
+    let mirror = SyncMode::Mirror {
+        source: Side::Right,
+    };
+    for (mode, records, left, right) in [
+        (
+            SyncMode::Sync,
+            foldover_types::FolderRecords::Both,
+            StatTrust::Read,
+            StatTrust::Read,
+        ),
+        (
+            backup,
+            foldover_types::FolderRecords::Both,
+            StatTrust::Read,
+            StatTrust::Reuse,
+        ),
+        (
+            backup,
+            foldover_types::FolderRecords::SourceOnly,
+            StatTrust::Read,
+            StatTrust::Read,
+        ),
+        (
+            mirror,
+            foldover_types::FolderRecords::Both,
+            StatTrust::Reuse,
+            StatTrust::Read,
+        ),
+    ] {
+        let draft = draft(mode, records);
+        assert_eq!(stat_trust(&draft, Side::Left), left, "{mode:?} {records:?}");
+        assert_eq!(
+            stat_trust(&draft, Side::Right),
+            right,
+            "{mode:?} {records:?}"
+        );
+    }
 }

@@ -32,7 +32,7 @@ use foldover_endpoint::{
     ApplyError, Bottleneck, Endpoint, EndpointPair, Expected, Filter, HeldLease, InvalidFilter,
     LeaseError, LeaseHolder, LeaseTiming, Observation, ObservationHints, ObserveStep,
     ObservedEntry, ObservedVersion, PairRootError, Pruning, Reach, RunScope, ScanError,
-    SnapshotBuilder, Written, access_denied,
+    SnapshotBuilder, StatTrust, Written, access_denied,
 };
 use foldover_host::RunAwake;
 use foldover_state::{
@@ -196,6 +196,10 @@ pub enum Commit<'a> {
         /// Entries as the writes behind `updates` left them, stored with
         /// them so the next run reuses their versions unread (ADR 0056).
         observed: &'a [(Side, SnapshotEntry)],
+        /// Paths whose writes failed: their stored entries are dropped, so
+        /// the next run reads them instead of trusting a stat the failure
+        /// may have contradicted (ADR 0057).
+        forgotten: &'a [(Side, SyncPath)],
     },
     /// An undo's base restorations for paths it is about to revert; the
     /// pair's automatic syncs are held from then on, so none redoes it.
@@ -922,6 +926,7 @@ impl PairRun {
                     Arc::clone(&base),
                     side,
                     hints,
+                    stat_trust(draft, side),
                     &mut || control(),
                     &mut |step| progress.observed(side, step),
                 )
@@ -1367,6 +1372,7 @@ impl PairRun {
             pending: Vec::new(),
             journal: Vec::new(),
             observed: Vec::new(),
+            forgotten: Vec::new(),
             written: 0,
             failed: PathPrefixIndex::new(),
         };
@@ -1376,11 +1382,13 @@ impl PairRun {
                 updates: &executor.pending,
                 journal: &executor.journal,
                 observed: &executor.observed,
+                forgotten: &executor.forgotten,
             };
             commit(revision, updates).map_err(RunError::Commit)?;
             executor.pending.clear();
             executor.journal.clear();
             executor.observed.clear();
+            executor.forgotten.clear();
             Ok::<_, RunError>(())
         };
 
@@ -1894,6 +1902,8 @@ struct Executor<'a> {
     journal: Vec<JournalEntry>,
     /// What those writes left, as observed right after each.
     observed: Vec<(Side, SnapshotEntry)>,
+    /// Paths whose writes failed, by the side written, committed with it.
+    forgotten: Vec<(Side, SyncPath)>,
     /// Writes journaled so far: the next entry's sequence number.
     written: u64,
     /// Paths whose change failed; their descendants are skipped.
@@ -2013,7 +2023,7 @@ impl<'a> Executor<'a> {
         let source = source.expect("handed-out copies have a source").version();
         match result {
             Ok(written) => self.record(row.path(), *from, source, written, *change),
-            Err(error) => self.fail(row.path(), &error),
+            Err(error) => self.fail_on(row.path(), from.other(), &error),
         }
     }
 
@@ -2030,7 +2040,7 @@ impl<'a> Executor<'a> {
             .version();
         match result {
             Ok(()) => self.record_archive(row.path(), *on, current),
-            Err(error) => self.fail(row.path(), &error),
+            Err(error) => self.fail_on(row.path(), *on, &error),
         }
     }
 
@@ -2082,7 +2092,7 @@ impl<'a> Executor<'a> {
                         .propagate(path, source, target, entry(target), change, control);
                 match stored {
                     Ok(written) => self.record(path, from, source.version(), written, change),
-                    Err(error) => self.fail(path, &error),
+                    Err(error) => self.fail_on(path, target, &error),
                 }
             }
             EntryDecision::Archive { on } => {
@@ -2096,7 +2106,7 @@ impl<'a> Executor<'a> {
                     .remove(path, current, self.scope(on), control)
                 {
                     Ok(()) => self.record_archive(path, on, current.version()),
-                    Err(error) => self.fail(path, &error),
+                    Err(error) => self.fail_on(path, on, &error),
                 }
             }
             // The row the entry moves to carries the move.
@@ -2124,7 +2134,8 @@ impl<'a> Executor<'a> {
         };
         let target = run.endpoints.endpoint(on);
         if let Err(error) = target.move_entry(from, current, to, self.scope(on), control) {
-            return self.fail(to, &error);
+            self.forgotten.push((on, from.clone()));
+            return self.fail_on(to, on, &error);
         }
         // The old path is gone either way; its base goes with it.
         self.pending.push(BaseUpdate::Forget(from.clone()));
@@ -2146,7 +2157,7 @@ impl<'a> Executor<'a> {
         self.written += 1;
         let stored = match stored {
             Ok(stored) => stored,
-            Err(error) => return self.fail(to, &error),
+            Err(error) => return self.fail_on(to, on, &error),
         };
         let (left, right) = match on {
             Side::Left => (stored, source.version()),
@@ -2218,6 +2229,14 @@ impl<'a> Executor<'a> {
         self.written += 1;
     }
 
+    /// `fail` for a write on `side` that may have found the entry there
+    /// other than its stored observation said: that observation is
+    /// dropped, so the next run reads the entry again (ADR 0057).
+    fn fail_on(&mut self, path: &SyncPath, side: Side, error: &ApplyError) {
+        self.forgotten.push((side, path.clone()));
+        self.fail(path, error);
+    }
+
     fn fail(&mut self, path: &SyncPath, error: &ApplyError) {
         if matches!(error, ApplyError::Scan(ScanError::Cancelled)) {
             self.report.completion = Completion::Cancelled;
@@ -2240,6 +2259,18 @@ use workers::Workers;
 
 mod undo;
 pub use undo::UndoReport;
+
+/// Whether a remote stat may prove a file on `side` unchanged (ADR 0057):
+/// only on a Backup's or Mirror's target that keeps records, which only
+/// Foldover writes, under a lease each run. Elsewhere an edit that kept
+/// size and modification time would be overwritten or stay unseen for a
+/// week instead of raising a conflict.
+fn stat_trust(draft: &foldover_types::PairDraft, side: Side) -> StatTrust {
+    match draft.role(side) {
+        FolderRole::Target if draft.unrecorded() != Some(side) => StatTrust::Reuse,
+        FolderRole::Target | FolderRole::Source | FolderRole::TwoWay => StatTrust::Read,
+    }
+}
 
 /// Whether `endpoint` takes renames for moves; another Mac's folder takes
 /// copies, so an older agent there never meets a request it lacks.

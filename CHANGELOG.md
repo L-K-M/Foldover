@@ -55,6 +55,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A Backup or Mirror to an SFTP server no longer reads every file in the
+  target on every sync. A file there that has not changed size, time,
+  permissions or owner, and was last changed more than an hour before
+  Foldover last read it, is taken as unchanged; each is still read again
+  about once a week. Sources, two-way folders and targets whose records
+  stay with the source are read in full as before (ADR 0057).
 - The sync after one that copied files into a folder on this Mac no
   longer reads those files again to check them: the sync that writes a
   file records it as it landed. This spares the second sync of a large

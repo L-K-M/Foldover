@@ -328,6 +328,11 @@ set.
 
 ### W1: stat-trust observation for SFTP targets (needs ADR + owner decision)
 
+**Status:** record-keeping targets are implemented as
+[ADR 0057](adr/0057-sftp-stat-trust.md). Two refinements: a failed copy,
+archive or move drops its path's row whatever the cause, which costs one
+reread, and the per-pair opt-in follows as its own change.
+
 Today the SFTP observe reads every file on every run. ADR 0028's
 "contents and link targets are re-read" is a deliberate contract, so
 this is a policy change, not a refactor.

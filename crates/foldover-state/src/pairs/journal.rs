@@ -95,12 +95,13 @@ impl PairStore {
         updates: &[BaseUpdate],
         journal: JournalUpdate<'_>,
     ) -> Result<(), Error> {
-        self.update_base_observed(id, revision, updates, journal, &[])
+        self.update_base_observed(id, revision, updates, journal, &[], &[])
     }
 
     /// `update_base`, also storing each side's entries as the writes behind
     /// the updates left them, so the next run reuses their versions unread
-    /// (ADR 0056).
+    /// (ADR 0056), and dropping the stored entries of `forgotten` paths,
+    /// so the next run reads them (ADR 0057).
     pub fn update_base_observed(
         &mut self,
         id: PairId,
@@ -108,6 +109,7 @@ impl PairStore {
         updates: &[BaseUpdate],
         journal: JournalUpdate<'_>,
         observed: &[(Side, SnapshotEntry)],
+        forgotten: &[(Side, SyncPath)],
     ) -> Result<(), Error> {
         let revision = database_revision(revision)?;
         let rows: Vec<JournalRow>;
@@ -129,7 +131,7 @@ impl PairStore {
                 JournalChange::Record { run, rows: &rows }
             }
         };
-        self.change_base(id, revision, updates, change, observed)
+        self.change_base(id, revision, updates, change, observed, forgotten)
     }
 
     /// A person synced: automatic syncs may run again.
