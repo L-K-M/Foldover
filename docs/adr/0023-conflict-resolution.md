@@ -70,8 +70,9 @@ once, always skip" (Always Skip adds a filter rule; ADR 0024).
 - **Skip once** (`keep: "skip"`, `--skip PATH`) leaves a previewed change
   and everything inside it as it is — no write, no base change — in the
   pair's next run that executes, scheduled or not, while both sides still
-  hold what the person saw. The agent keeps skips in memory: a restart
-  forgets them, and the next preview shows the change again.
+  hold what the person saw. The agent stores skips with the pair's
+  records, so a restart keeps them
+  ([ADR 0055](0055-interrupted-runs.md)).
 
 ## Consequences
 
