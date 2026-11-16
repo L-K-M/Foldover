@@ -107,6 +107,17 @@ Two designs were reviewed and rejected:
   `sync.status`.
 - A backup continues at once instead of at its next interval or the
   person's next sync, and Undo after it reverts the whole logical sync.
+- A killed run gets less than that. A crash or a power loss kills one,
+  and so does a logout or a restart during a sync that needs longer
+  than launchd's exit timeout: a stopping agent lets its sync run on
+  until launchd kills it. The run continuing it first waits about two
+  minutes for the dead run's lease to lapse
+  ([ADR 0032](0032-root-leases.md)). And what the killed run wrote after
+  its last commit, up to a batch of 256 entries and the copies then in
+  flight ([ADR 0020](0020-run-execution.md)), is in no journal: the
+  continuing run finds those paths equal on both sides, and Undo leaves
+  them as the killed run left them. A version it replaced or removed
+  there stays in its archive folder.
 - A resumed sync of a pair an undo holds does not start: the hold keeps
   every automatic start out until a person syncs.
 - A path written by both an interrupted run and the run continuing it

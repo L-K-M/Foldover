@@ -216,6 +216,15 @@ you might expect. Only the last three below block saving
   kept, and never the other folder's side. Entries changed since the
   run, already pruned, or in a folder no longer empty stay and are
   listed ([ADR 0029](../adr/0029-undo.md)).
+- **A killed sync costs its last items.** A sync that continues an
+  interrupted one is undone together with it. If the agent was killed
+  during the first one, by a crash, a power loss, or a logout or restart
+  while it synced, the last items that sync wrote, up to about 256, were
+  not recorded yet: Undo leaves them as they are, and what the sync
+  replaced or removed there stays in its archive. The sync also
+  continues only about two minutes after the agent starts, once the
+  killed sync's lease on the folders has lapsed
+  ([ADR 0055](../adr/0055-interrupted-runs.md)).
 - Empty folders are not recreated by Undo
   ([ADR 0029](../adr/0029-undo.md)).
 
