@@ -52,6 +52,9 @@ All notable changes to this project are documented here. The format follows
   response".
 - A Mac advertising pairing on port 0 is ignored instead of being listed
   as open for pairing.
+- A copy to an SFTP server that stops because the connection broke off
+  is reported as a failed write. It used to say the source changed since
+  the preview.
 
 ### Changed
 
@@ -59,7 +62,8 @@ All notable changes to this project are documented here. The format follows
   it stopped if the sync is cancelled, the Mac restarts or the agent
   stops, instead of starting over. Foldover keeps the part the server
   confirmed in the server folder's `.foldover/partial` and sends only
-  the rest (ADR 0058).
+  the rest, as long as the file on this Mac has not been written since
+  (ADR 0058).
 - A Backup or Mirror to an SFTP server no longer reads every file in the
   target on every sync. A file there that has not changed size, time,
   permissions or owner, and was last changed more than an hour before
@@ -95,11 +99,16 @@ All notable changes to this project are documented here. The format follows
   it still stops to ask before removing more than 50 items and 1% of a
   folder, or whenever the pair requires review, and it waits for you if
   you changed the pair's settings meanwhile. Choose Don't Resume in the
-  sidebar's menu, or run `foldover sync ID --cancel`, to decline it. Undo
-  after the continued sync reverts all of it, not only the part after the
-  restart, and "skip in the next run" choices now survive a restart. A
-  sync that keeps crashing the agent stops continuing by itself after two
-  attempts (local protocol 24, schema v32, ADR 0055).
+  sidebar's menu, or run `foldover sync ID --cancel`, to decline it;
+  previewing or undoing the pair also keeps it from continuing by
+  itself. Undo after the continued sync reverts both parts, not only the
+  one after the restart. Where the agent was killed during the sync, by
+  a crash, a power loss or a restart, Undo leaves the last items that
+  sync wrote, up to about 256, which nothing had recorded yet. "Skip in
+  the next run" choices now survive a restart. A sync that keeps
+  crashing the agent stops continuing by itself after two attempts, and
+  its pair's schedule waits with it until you sync, preview or dismiss
+  the pair (local protocol 24, schema v32, ADR 0055).
 - Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
   `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
   until you resume it, while Sync Now still works.

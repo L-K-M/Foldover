@@ -113,7 +113,9 @@ pub struct SftpEndpoint {
 }
 
 /// A content claimed for staging at `remote` in `PARTIAL_DIRECTORY`
-/// (ADR 0058), released when dropped.
+/// (ADR 0058), released when dropped. The file is named after the
+/// content and the state of the file it is read from, so only a copy of
+/// that file, not written since, finds and continues it.
 pub(crate) struct Partial<'a> {
     endpoint: &'a SftpEndpoint,
     content: [u8; 32],
@@ -1136,16 +1138,24 @@ impl SftpEndpoint {
         }
     }
 
-    /// Claim staging the `size`-byte file with `content` in the partial
-    /// folder; `None` while another copy of it stages there.
-    pub(crate) fn claim_partial(&self, content: Digest, size: u64) -> Option<Partial<'_>> {
+    /// Claim staging the `size`-byte file with `content`, read from a
+    /// file in state `source`, in the partial folder; `None` while
+    /// another copy of the content stages there.
+    pub(crate) fn claim_partial(
+        &self,
+        content: Digest,
+        source: crate::local::SourceState,
+        size: u64,
+    ) -> Option<Partial<'_>> {
         let content = *content.as_bytes();
         let claimed = self
             .partials
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(content);
-        let name: String = content.iter().map(|byte| format!("{byte:02x}")).collect();
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let name = format!("{}-{}", hex(&content), hex(source.as_bytes()));
         claimed.then(|| Partial {
             endpoint: self,
             content,
@@ -1154,12 +1164,14 @@ impl SftpEndpoint {
         })
     }
 
-    /// Stage `partial`'s file, continuing what a stopped copy left there
-    /// (ADR 0058). `produce` gets the byte it starts from and the sink.
+    /// Stage `partial`'s file, continuing what a stopped copy of the
+    /// same file in the same state left there (ADR 0058). `produce` gets
+    /// the byte it starts from and the sink.
     /// Writes are trusted once acknowledged, and only an interrupted
     /// write window past them is sent again: every byte more than
     /// `WRITE_WINDOW_BYTES` before the kept file's end was acknowledged.
-    /// A failed write keeps the file for the next copy of this content.
+    /// A failed write keeps the file for the next copy of this file,
+    /// not written since.
     fn upload_partial_on(
         &self,
         session: &mut Session,

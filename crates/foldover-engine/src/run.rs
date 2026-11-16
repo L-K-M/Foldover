@@ -196,9 +196,10 @@ pub enum Commit<'a> {
         /// Entries as the writes behind `updates` left them, stored with
         /// them so the next run reuses their versions unread (ADR 0056).
         observed: &'a [(Side, SnapshotEntry)],
-        /// Paths whose writes failed: their stored entries are dropped, so
-        /// the next run reads them instead of trusting a stat the failure
-        /// may have contradicted (ADR 0057).
+        /// Paths a write changed, or failed on, without reporting what it
+        /// left: their stored entries are dropped, so the next run reads
+        /// them instead of trusting a stat the entry before the write had
+        /// too, or one the failure contradicted (ADR 0056, ADR 0057).
         forgotten: &'a [(Side, SyncPath)],
     },
     /// An undo's base restorations for paths it is about to revert; the
@@ -1910,7 +1911,10 @@ struct Executor<'a> {
     journal: Vec<JournalEntry>,
     /// What those writes left, as observed right after each.
     observed: Vec<(Side, SnapshotEntry)>,
-    /// Paths whose writes failed, by the side written, committed with it.
+    /// Paths whose stored observation a write made stale without one to
+    /// replace it, by side, committed with `pending`. Every write the run
+    /// makes lands in one of the two lists: a stored observation never
+    /// outlives a write to its path.
     forgotten: Vec<(Side, SyncPath)>,
     /// Writes journaled so far: the next entry's sequence number.
     written: u64,
@@ -2031,7 +2035,7 @@ impl<'a> Executor<'a> {
         let source = source.expect("handed-out copies have a source").version();
         match result {
             Ok(written) => self.record(row.path(), *from, source, written, *change),
-            Err(error) => self.fail_on(row.path(), from.other(), &error),
+            Err(error) => self.fail_copy(row.path(), *from, &error),
         }
     }
 
@@ -2056,6 +2060,8 @@ impl<'a> Executor<'a> {
         self.report.archived += 1;
         self.journal(path, on, JournalAction::Archive(version));
         self.pending.push(BaseUpdate::Forget(path.clone()));
+        // Whatever appears at the path next is not what was stored.
+        self.forgotten.push((on, path.clone()));
     }
 
     /// Data bytes `row` workers.
@@ -2100,7 +2106,7 @@ impl<'a> Executor<'a> {
                         .propagate(path, source, target, entry(target), change, control);
                 match stored {
                     Ok(written) => self.record(path, from, source.version(), written, change),
-                    Err(error) => self.fail_on(path, target, &error),
+                    Err(error) => self.fail_copy(path, from, &error),
                 }
             }
             EntryDecision::Archive { on } => {
@@ -2141,9 +2147,13 @@ impl<'a> Executor<'a> {
             return self.fail_message(to, "Planned move entry is missing");
         };
         let target = run.endpoints.endpoint(on);
-        if let Err(error) = target.move_entry(from, current, to, self.scope(on), control) {
-            self.forgotten.push((on, from.clone()));
-            return self.fail_on(to, on, &error);
+        let moved = target.move_entry(from, current, to, self.scope(on), control);
+        // A move reports no observation, and a failed one may have found
+        // either path other than stored: the next run reads both.
+        self.forgotten.push((on, from.clone()));
+        self.forgotten.push((on, to.clone()));
+        if let Err(error) = moved {
+            return self.fail(to, &error);
         }
         // The old path is gone either way; its base goes with it.
         self.pending.push(BaseUpdate::Forget(from.clone()));
@@ -2165,7 +2175,7 @@ impl<'a> Executor<'a> {
         self.written += 1;
         let stored = match stored {
             Ok(stored) => stored,
-            Err(error) => return self.fail_on(to, on, &error),
+            Err(error) => return self.fail(to, &error),
         };
         let (left, right) = match on {
             Side::Left => (stored, source.version()),
@@ -2189,39 +2199,50 @@ impl<'a> Executor<'a> {
         change: ChangeKind,
     ) {
         let stored = written.version;
+        let target = from.other();
         // The write happened whatever the base says next.
         let action = match change {
             ChangeKind::Create => JournalAction::Create(stored),
             ChangeKind::ReplaceContent => JournalAction::Replace(stored),
             ChangeKind::UpdateMetadata => JournalAction::Metadata(stored),
         };
-        self.journal(path, from.other(), action);
+        self.journal(path, target, action);
         let (left, right) = match from {
             Side::Left => (source, stored),
             Side::Right => (stored, source),
         };
-        match BaselineEntry::new(left, right) {
+        let recorded = match BaselineEntry::new(left, right) {
             Ok(base) => {
                 match change {
                     ChangeKind::UpdateMetadata => self.report.updated += 1,
                     ChangeKind::Create | ChangeKind::ReplaceContent => self.report.copied += 1,
                 }
                 self.pending.push(BaseUpdate::Record(path.clone(), base));
-                if let Some(observed) = written
-                    .observed
-                    .filter(|observed| observed.version() == stored)
-                {
-                    self.observed.push((
-                        from.other(),
-                        SnapshotEntry {
-                            path: path.clone(),
-                            fingerprint: observed.fingerprint_bytes(),
-                            version: stored,
-                        },
-                    ));
-                }
+                true
             }
-            Err(_) => self.fail_message(path, "Stored content differs from the source"),
+            Err(_) => {
+                self.fail_message(path, "Stored content differs from the source");
+                false
+            }
+        };
+        // The observation stored before the run describes what this write
+        // replaced. What the write left takes its place; a write that
+        // reports nothing usable drops it instead, so the next run reads
+        // the entry. A file placed with its predecessor's size and time
+        // would otherwise pass for it on an SFTP folder (ADR 0057).
+        match written
+            .observed
+            .filter(|observed| recorded && observed.version() == stored)
+        {
+            Some(observed) => self.observed.push((
+                target,
+                SnapshotEntry {
+                    path: path.clone(),
+                    fingerprint: observed.fingerprint_bytes(),
+                    version: stored,
+                },
+            )),
+            None => self.forgotten.push((target, path.clone())),
         }
     }
 
@@ -2243,6 +2264,20 @@ impl<'a> Executor<'a> {
     fn fail_on(&mut self, path: &SyncPath, side: Side, error: &ApplyError) {
         self.forgotten.push((side, path.clone()));
         self.fail(path, error);
+    }
+
+    /// `fail_on` for a copy from `from`. One that failed on the content it
+    /// read contradicts the source's stored observation too: where that
+    /// side's stats are trusted, the reused version would fail the same
+    /// copy every run until the file's weekly reread.
+    fn fail_copy(&mut self, path: &SyncPath, from: Side, error: &ApplyError) {
+        if matches!(
+            error,
+            ApplyError::SourceChanged(_) | ApplyError::ContentNotStored(_)
+        ) {
+            self.forgotten.push((from, path.clone()));
+        }
+        self.fail_on(path, from.other(), error);
     }
 
     fn fail(&mut self, path: &SyncPath, error: &ApplyError) {

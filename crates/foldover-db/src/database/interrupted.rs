@@ -7,6 +7,7 @@
 //! admit ─▶ running ─finished or cancelled─▶ (deleted)
 //!             ├─stopped otherwise─▶ ended
 //!             └─agent start finds it─▶ interrupted ─person declines─▶ (deleted)
+//!                                           └─another job takes its place─▶ ended
 //! ```
 //!
 //! A run that continues one which wrote, or which itself continued an
@@ -163,6 +164,17 @@ impl Database {
         )?;
         Ok(())
     }
+
+    /// A job that is not admitted, such as a preview, took the place of
+    /// the pair's interrupted run: the next run still continues its
+    /// journal, but nothing resumes it.
+    pub fn end_interrupted(&mut self, pair: &[u8]) -> Result<(), Error> {
+        self.connection.execute(
+            "UPDATE interrupted_run SET state='ended' WHERE pair_id=?1 AND state='interrupted'",
+            [pair],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +267,28 @@ mod tests {
             .query_row("SELECT count(*) FROM interrupted_run", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn an_interrupted_run_another_job_replaced_is_not_found_again_and_keeps_its_journal() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        database.admit_run(&admitted(&pair.id, 1), 0).unwrap();
+        record(&mut database, &pair.id, "r1");
+
+        // Only a run an agent start found is ended this way.
+        database.end_interrupted(&pair.id).unwrap();
+        assert_eq!(database.interrupted_at_start(true).unwrap().len(), 1);
+
+        database.end_interrupted(&pair.id).unwrap();
+        assert!(database.interrupted_at_start(true).unwrap().is_empty());
+
+        // The next run continues its journal, without its unclean stop.
+        database.admit_run(&admitted(&pair.id, 2), 0).unwrap();
+        record(&mut database, &pair.id, "r2");
+        assert_eq!(runs(&database, &pair.id), ["r1", "r2"]);
+        assert_eq!(database.interrupted_at_start(false).unwrap()[0].unclean, 0);
     }
 
     #[test]

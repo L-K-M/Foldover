@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::io;
+use std::time::SystemTime;
 
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
 use foldover_net::sftp::{Attributes, FileKind, Session};
@@ -61,10 +62,12 @@ impl Source<'_> {
         }
     }
 
-    /// Push the file's data from byte `from`; a failure carries the
-    /// endpoint's error out through `error`, since the sink only speaks
-    /// `io::Error`. Another Mac was asked for that offset when the
-    /// source was opened.
+    /// Push the file's data from byte `from`; a failure of the source
+    /// carries the endpoint's error out through `error`, since the sink
+    /// only speaks `io::Error`. A failure of the sink is the
+    /// destination's and comes back as it was, with `error` left empty:
+    /// the source's reader would report it as its own. Another Mac was
+    /// asked for that offset when the source was opened.
     fn push(
         &self,
         path: &SyncPath,
@@ -81,6 +84,9 @@ impl Source<'_> {
         // A cancel during a wait reaches the source as a failed write, so
         // it is noted here to come out as the cancel it is.
         let cancelled = Cell::new(false);
+        // What the destination failed a chunk with, kept here while the
+        // source's reader unwinds with a stand-in.
+        let refused = RefCell::new(None);
         let mut checked = || {
             let state = (*control.borrow_mut())();
             if state == ScanControl::Cancel {
@@ -96,7 +102,11 @@ impl Source<'_> {
                 cancelled.set(true);
                 return Err(io::Error::other("cancelled"));
             }
-            sink(chunk)
+            sink(chunk).map_err(|error| {
+                let kind = error.kind();
+                *refused.borrow_mut() = Some(error);
+                io::Error::from(kind)
+            })
         };
         let (control, sink) = (&mut checked, &mut paced);
         let pushed = match self {
@@ -114,6 +124,11 @@ impl Source<'_> {
             Self::Peer(source) => source.push(path, control, sink).map(|()| None),
         };
         pushed.map_err(|failure| {
+            if !cancelled.get()
+                && let Some(destination) = refused.take()
+            {
+                return destination;
+            }
             *error.borrow_mut() = Some(match cancelled.get() {
                 true => ApplyError::Scan(ScanError::Cancelled),
                 false => failure,
@@ -125,6 +140,32 @@ impl Source<'_> {
 
 /// Make `to`'s `path` hold `from`'s entry and return the version stored.
 pub(crate) fn copy(
+    to: &Endpoint,
+    from: &Endpoint,
+    path: &SyncPath,
+    planned: &ObservedEntry,
+    current: Expected<'_>,
+    run: &RunScope,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<EntryVersion, ApplyError> {
+    copy_at(
+        SystemTime::now(),
+        to,
+        from,
+        path,
+        planned,
+        current,
+        run,
+        control,
+    )
+}
+
+/// `copy` begun at `began`, the time its source's timestamps are judged
+/// by. A test passes a later one, since nothing it does makes a change
+/// time old.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_at(
+    began: SystemTime,
     to: &Endpoint,
     from: &Endpoint,
     path: &SyncPath,
@@ -212,11 +253,16 @@ pub(crate) fn copy(
             // records is staged where a stopped copy can resume. Only a
             // local source returns the whole file's digest from a
             // resumed read; a server that keeps nothing starts over.
-            let partial = match (from, run.archiving(), expected) {
-                (Endpoint::Local(_), Archiving::Kept, EntryContent::File(content))
+            // Nothing hashes what the server kept, so the staged file
+            // belongs to this file in this state alone: one written
+            // since, a duplicate, or a file changed too recently to tell
+            // starts its own.
+            let partial = match (&source, run.archiving(), expected) {
+                (Source::Local(_, entry), Archiving::Kept, EntryContent::File(content))
                     if planned.size() >= PARTIAL_MIN_BYTES =>
                 {
-                    remote.claim_partial(content, planned.size())
+                    crate::LocalEndpoint::source_state(entry, began)
+                        .and_then(|state| remote.claim_partial(content, state, planned.size()))
                 }
                 _ => None,
             };
@@ -512,16 +558,34 @@ fn send_on(
             // the whole file stands for the bytes the server kept.
             let whole = Cell::new(None);
             let staged = match partial {
-                Some(partial) => remote.upload_partial_on(
-                    session,
-                    partial,
-                    synced_mode(DEFAULT_FILE),
-                    options.durability(),
-                    |start, sink| {
-                        whole.set(source.push(path, start, run, control, sink, &failure)?);
-                        Ok(())
-                    },
-                ),
+                Some(partial) => {
+                    let staged = remote.upload_partial_on(
+                        session,
+                        partial,
+                        synced_mode(DEFAULT_FILE),
+                        options.durability(),
+                        |start, sink| {
+                            whole.set(source.push(path, start, run, control, sink, &failure)?);
+                            Ok(())
+                        },
+                    );
+                    // A copy of this file in this state takes up what this
+                    // one staged without reading it (ADR 0058), so the
+                    // staged file stays when a person or the server
+                    // stopped the copy. A source that failed while it was
+                    // read, changed for one, may have sent other bytes
+                    // and is in another state now: nothing would ever
+                    // continue what was staged, so it goes at once rather
+                    // than with the archive's retention.
+                    let source_failed = matches!(
+                        *failure.borrow(),
+                        Some(ref failure) if !matches!(failure, ApplyError::Scan(ScanError::Cancelled))
+                    );
+                    if staged.is_err() && source_failed {
+                        remote.discard_on(session, &partial.remote);
+                    }
+                    staged
+                }
                 None => remote.upload_on(
                     session,
                     path.as_bytes(),

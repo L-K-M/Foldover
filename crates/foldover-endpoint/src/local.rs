@@ -3,7 +3,7 @@ pub(crate) mod archive;
 mod conflict;
 pub(crate) mod filter;
 mod foreign;
-pub(crate) use foreign::Carried;
+pub(crate) use foreign::{Carried, SourceState};
 mod fingerprint_key;
 mod identity;
 mod lock;
@@ -2422,6 +2422,56 @@ mod tests {
                 .all(|limit| *limit >= REREAD / 2 && *limit < REREAD)
         );
         assert!(limits.len() > 32, "rereads are spread");
+    }
+
+    /// ADR 0058: a file has a source state once a later write must move
+    /// one of its times, so neither may lie within the racy window. A
+    /// write that puts the modification time back shows in the change
+    /// time alone, so an old modification time does not settle a file
+    /// just changed, nor an old change time one just modified.
+    #[test]
+    fn a_source_state_waits_for_both_of_the_files_times() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"data").unwrap();
+        let endpoint = LocalEndpoint::open(directory.path()).unwrap();
+        let modified_at = |modified: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            endpoint.entry_at(&path(b"file")).unwrap().unwrap()
+        };
+        let short = Duration::from_nanos(1);
+        let minute = Duration::from_secs(60);
+
+        let entry = modified_at(SystemTime::now() - minute);
+        let changed = entry.metadata().changed().unwrap();
+        assert!(changed > entry.metadata().modified() + RACY_WINDOW);
+        assert_eq!(
+            LocalEndpoint::source_state(&entry, changed + RACY_WINDOW - short),
+            None
+        );
+        let state = LocalEndpoint::source_state(&entry, changed + RACY_WINDOW);
+        assert!(state.is_some());
+        assert_eq!(LocalEndpoint::source_state(&entry, changed + minute), state);
+
+        let entry = modified_at(SystemTime::now() + minute);
+        let modified = entry.metadata().modified();
+        assert!(modified > entry.metadata().changed().unwrap() + RACY_WINDOW);
+        assert_eq!(
+            LocalEndpoint::source_state(&entry, modified + RACY_WINDOW - short),
+            None
+        );
+        assert!(LocalEndpoint::source_state(&entry, modified + RACY_WINDOW).is_some());
+
+        // A clock behind the file's times proves nothing about them.
+        assert_eq!(
+            LocalEndpoint::source_state(&entry, SystemTime::UNIX_EPOCH),
+            None
+        );
     }
 
     /// PLAN.md §4.8: a full second in the persisted nanosecond field used

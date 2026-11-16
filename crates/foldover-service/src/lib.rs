@@ -2041,6 +2041,170 @@ mod tests {
         assert!(service.jobs.resumable().is_empty());
     }
 
+    /// ADR 0055: a run the agent stopped uncleanly during twice waits for
+    /// a person. A killed run leaves its pair's schedule due, so the
+    /// schedule must not start it either, or a run that crashes the agent
+    /// would be restarted for ever.
+    #[tokio::test]
+    async fn a_crash_looping_run_is_not_restarted_by_its_schedule() {
+        let (directory, service) = fixture();
+        let mut input = input(directory.path(), "Notes");
+        input["options"]["schedule"] = json!({"kind": "every", "minutes": 1});
+        let created = service
+            .handle(Request::call(1, PAIR_CREATE, Some(input)))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        let start = service.scheduler.started();
+        let at = |seconds| start + std::time::Duration::from_secs(seconds);
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        for _ in 0..2 {
+            interrupt(
+                &service,
+                id,
+                foldover_engine::WritingRun::Scheduled,
+                foldover_engine::Resume::Auto,
+                true,
+            );
+        }
+        // The interval has passed, as it had when the killed run started.
+        assert!(run_due_started(&service, at(61)).await.is_empty());
+        assert!(
+            service
+                .jobs
+                .start(&service.engine, id, sync::Work::Scheduled)
+                .is_err()
+        );
+        let status = service
+            .handle(Request::call(2, SYNC_STATUS, Some(key.clone())))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&status["state"], &status["resumes"]),
+            (&json!("interrupted"), &json!(false))
+        );
+
+        // A person's sync is theirs to try; once it finishes, the
+        // schedule goes on.
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(3, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+        assert_eq!(run_due_started(&service, at(122)).await, [id]);
+        assert_eq!(settled(&service, &key).await["state"], "finished");
+    }
+
+    /// A person who previews an interrupted pair, or tries to undo it, has
+    /// taken it in hand: nothing continues it by itself afterwards, in
+    /// this agent or after the next start.
+    #[tokio::test]
+    async fn previewing_or_undoing_an_interrupted_sync_ends_its_continuation() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Photos")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        for (method, state) in [(SYNC_PREVIEW, "previewed"), (SYNC_UNDO, "failed")] {
+            interrupt(
+                &service,
+                id,
+                foldover_engine::WritingRun::Manual,
+                foldover_engine::Resume::Auto,
+                false,
+            );
+            assert_eq!(service.jobs.resumable().len(), 1);
+            service
+                .handle(Request::call(2, method, Some(key.clone())))
+                .await
+                .unwrap();
+            assert_eq!(settled(&service, &key).await["state"], state, "{method}");
+            assert!(service.jobs.resumable().is_empty(), "{method}");
+            // The next agent start finds nothing to continue.
+            assert!(
+                service
+                    .engine
+                    .lock()
+                    .unwrap()
+                    .interrupted_at_start(false)
+                    .unwrap()
+                    .is_empty(),
+                "{method}"
+            );
+        }
+    }
+
+    /// ADR 0055: every result ends a run's admission. A panic that held
+    /// the engine lock fails the jobs after it; a run that ends so ended
+    /// in this agent, and the next start must not take it for interrupted
+    /// and continue it.
+    #[tokio::test]
+    async fn a_run_that_ends_on_a_poisoned_engine_is_not_found_interrupted() {
+        let (directory, service) = fixture();
+        let created = service
+            .handle(Request::call(
+                1,
+                PAIR_CREATE,
+                Some(input(directory.path(), "Music")),
+            ))
+            .await
+            .unwrap();
+        let key = json!({"id": created["id"]});
+        let id: PairId = created["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(first_sync(&service, &key).await["state"], "finished");
+
+        let (reached, release) = service.jobs.gate_job();
+        let run = json!({"id": created["id"], "approved_left_deletions": 0, "approved_right_deletions": 0});
+        service
+            .handle(Request::call(2, SYNC_RUN, Some(run)))
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let engine = Arc::clone(&service.engine);
+        let panicked = std::thread::spawn(move || {
+            let _guard = engine.lock().unwrap();
+            panic!("injected failure")
+        })
+        .join();
+        assert!(panicked.is_err());
+        release.send(()).unwrap();
+        for _ in 0..3_000 {
+            if !service.jobs.is_working(id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let ended = service.jobs.status(id);
+        assert!(matches!(ended, SyncStatus::Failed { .. }), "{ended:?}");
+
+        assert!(
+            service
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .interrupted_at_start(false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn failed_scheduled_runs_retry_at_the_next_cadence() {
         let (directory, service) = fixture();

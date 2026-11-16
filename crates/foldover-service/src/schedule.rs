@@ -722,6 +722,9 @@ impl Service {
         // its holds allow, a person's sync too (ADR 0055). Read before the
         // engine lock, which the jobs lock never spans.
         let resumable = self.jobs.resumable();
+        // One that stopped the agent repeatedly waits for a person, and
+        // its pair's schedule with it: no folder check is spent on it.
+        let crash_held = self.jobs.crash_held();
         let (mut candidates, held, last_run, effort) = {
             let Ok(engine) = self.engine.lock() else {
                 return Vec::new();
@@ -814,7 +817,7 @@ impl Service {
                     .scheduler
                     .due(&pair, now, local_now, recorded.and_then(local_time))
                 || self.scheduler.interval_passed(&pair, recorded);
-            if held.contains(&pair.id()) || !due {
+            if held.contains(&pair.id()) || crash_held.contains(&pair.id()) || !due {
                 continue;
             }
             match self.scheduler.gate(pair.id(), now) {

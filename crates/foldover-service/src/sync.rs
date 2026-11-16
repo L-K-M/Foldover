@@ -100,6 +100,12 @@ impl Work {
 /// crash-loop safe mode only counts quick successive crashes (ADR 0055).
 const UNCLEAN_STOPS_BEFORE_HOLDING: u32 = 2;
 
+/// Whether `run` stopped the agent uncleanly so often that it waits for a
+/// person (ADR 0055).
+fn crash_looping(run: &InterruptedRun) -> bool {
+    run.unclean >= UNCLEAN_STOPS_BEFORE_HOLDING
+}
+
 /// Whether a job's run was admitted in the state database, so its result
 /// ends the admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -286,10 +292,11 @@ enum MutationScope {
 #[derive(Default)]
 struct State {
     jobs: HashMap<PairId, Job>,
-    /// What started each interrupted run an agent start found, so the
-    /// scheduler continues it as the same kind of run (ADR 0055), stored
-    /// with the pair revision it ran under.
-    interrupted: HashMap<PairId, (WritingRun, u64)>,
+    /// The interrupted run an agent start found for each pair, until a job
+    /// takes its place or a person declines it (ADR 0055): what started
+    /// it, so the scheduler continues it as the same kind of run, the pair
+    /// revision it ran under, and its unclean stops.
+    interrupted: HashMap<PairId, InterruptedRun>,
     /// Pairs whose configuration is being replaced refuse new job claims.
     mutating: HashSet<PairId>,
     /// Pairs between a successful claim check and Working publication.
@@ -338,11 +345,9 @@ impl Jobs {
                 });
             let status = SyncStatus::Interrupted {
                 started,
-                resumes: run.resume == Resume::Auto
-                    && run.unclean < UNCLEAN_STOPS_BEFORE_HOLDING
-                    && settings_kept,
+                resumes: run.resume == Resume::Auto && !crash_looping(run) && settings_kept,
             };
-            state.interrupted.insert(run.pair, (run.run, run.revision));
+            state.interrupted.insert(run.pair, *run);
             state.jobs.insert(
                 run.pair,
                 Job {
@@ -365,19 +370,33 @@ impl Jobs {
             .iter()
             .filter(|(_, job)| matches!(job.status, SyncStatus::Interrupted { resumes: true, .. }))
             .map(|(id, _)| {
-                let work = match state.interrupted.get(id) {
-                    Some((WritingRun::Manual, _)) => Work::Resume,
-                    Some((WritingRun::Scheduled, _)) | None => Work::Scheduled,
+                let work = match state.interrupted.get(id).map(|run| run.run) {
+                    Some(WritingRun::Manual) => Work::Resume,
+                    Some(WritingRun::Scheduled) | None => Work::Scheduled,
                 };
                 (*id, work)
             })
             .collect()
     }
 
+    /// Pairs whose interrupted run stopped the agent uncleanly too often.
+    /// Nothing unattended starts them, their own schedule included, until
+    /// a person syncs, previews or dismisses them: a killed run leaves its
+    /// pair due, so the schedule would restart it at every agent start.
+    pub(crate) fn crash_held(&self) -> HashSet<PairId> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .interrupted
+            .iter()
+            .filter(|(_, run)| crash_looping(run))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// The revision the pair's interrupted run ran under.
     fn interrupted_revision(&self, id: PairId) -> Option<u64> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.interrupted.get(&id).map(|(_, revision)| *revision)
+        state.interrupted.get(&id).map(|run| run.revision)
     }
 
     /// The pair's interrupted run no longer continues by itself.
@@ -749,6 +768,16 @@ impl Jobs {
             }
             _ => Admission::NotAdmitted,
         };
+        // A job that is not admitted, a preview or an undo, takes the
+        // place of an interrupted run all the same. End that run's row, or
+        // the next agent start would show the pair interrupted again and
+        // continue a sync this job replaced. Its journal stays for the
+        // next run.
+        if admission == Admission::NotAdmitted
+            && let Err(error) = engine_guard.end_interrupted(id)
+        {
+            eprintln!("foldoverd: the interrupted run's end cannot be recorded: {error}");
+        }
         drop(engine_guard);
         // Publish only after activation and capture. A status poll therefore
         // sees either the old terminal state or this exact active context.
@@ -954,6 +983,10 @@ impl Jobs {
             // The scheduler chose the pair before taking this lock; a
             // person may have declined the sync or changed its settings.
             Some("The interrupted sync no longer continues by itself")
+        } else if work.unattended() && state.interrupted.get(&id).is_some_and(crash_looping) {
+            // The pair's own schedule is as unattended as a continuation,
+            // and would restart what stopped the agent.
+            Some("The interrupted sync stopped the agent repeatedly and waits for a person")
         } else {
             match state.jobs.get(&id).map(|job| (&job.status, job.after)) {
                 Some((SyncStatus::Working { .. }, _)) => {
@@ -1065,12 +1098,21 @@ impl Jobs {
             // cannot see the old job Working after activation and leave
             // a replacement stranded. No jobs lock spans database work.
             let mut engine = engine.as_ref().map(|engine| engine.lock());
-            if let (Admission::Admitted, Some(Ok(engine))) = (admission, engine.as_mut()) {
+            // A poisoned lock still guards a consistent store, as for the
+            // run's commits: a run that ends after a panic poisoned it
+            // ended here all the same, and must not be found running, and
+            // continued, at the next agent start.
+            let store = match engine.as_mut() {
+                Some(Ok(engine)) => Some(&mut **engine),
+                Some(Err(poisoned)) => Some(&mut **poisoned.get_mut()),
+                None => None,
+            };
+            if let (Admission::Admitted, Some(store)) = (admission, store) {
                 let end = match status {
                     SyncStatus::Finished { .. } | SyncStatus::Idle => RunEnd::Spent,
                     _ => RunEnd::Kept,
                 };
-                if let Err(error) = engine.end_run(id, end) {
+                if let Err(error) = store.end_run(id, end) {
                     eprintln!("foldoverd: the run's end cannot be recorded: {error}");
                 }
             }

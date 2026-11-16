@@ -1197,9 +1197,9 @@ impl Database {
     /// `change_base`, also storing each side's entries as the writes behind
     /// the changes left them (ADR 0056), so the next run reuses their
     /// versions unread, and deleting the stored rows of `forgotten` paths,
-    /// whose writes failed, so the next run reads them (ADR 0057). A
-    /// snapshot row never outlives the base it proves. Both hold
-    /// `(side, …)` pairs, `side` `left` or `right`.
+    /// whose writes failed or reported nothing, so the next run reads them
+    /// (ADR 0057). A snapshot row never outlives the base it proves. Both
+    /// hold `(side, …)` pairs, `side` `left` or `right`.
     pub fn change_base_observed<T: SnapshotData>(
         &mut self,
         pair: &[u8],

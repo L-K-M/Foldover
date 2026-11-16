@@ -57,7 +57,10 @@ about weekly (PLAN.md §4.8).
   the batch's base, so the next run reads it. A stale reused version
   fails there, since writes still verify the destination's content
   (ADR 0034), and would otherwise fail the same way until its weekly
-  reread.
+  reread. A copy that fails on the content it read, a changed source or
+  a digest that is not the planned one, drops the source side's as
+  well: where a pair trusts every folder, the reused version may be the
+  source's.
 
 ## Consequences
 

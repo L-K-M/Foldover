@@ -216,6 +216,16 @@ you might expect. Only the last three below block saving
   kept, and never the other folder's side. Entries changed since the
   run, already pruned, or in a folder no longer empty stay and are
   listed ([ADR 0029](../adr/0029-undo.md)).
+- **A killed sync costs its last items.** A sync that continues an
+  interrupted one is undone together with it. If the agent was killed
+  during the first one, by a crash, a power loss, or a logout or restart
+  while it synced, the last items that sync wrote, up to about 256, were
+  not recorded yet: Undo leaves them as they are, and what the sync
+  replaced or removed there stays in its archive. The sync also
+  continues only about two minutes after the agent starts, or about
+  four for a two-way Sync: for each folder it writes, it first watches
+  the lease the killed sync left there for two minutes
+  ([ADR 0055](../adr/0055-interrupted-runs.md)).
 - Empty folders are not recreated by Undo
   ([ADR 0029](../adr/0029-undo.md)).
 
@@ -237,10 +247,6 @@ you might expect. Only the last three below block saving
 - **Always Skip** writes an exact-path rule; names that are not UTF-8
   cannot be written and are not offered
   ([ADR 0024](../adr/0024-filters.md)).
-- **Skip once lives in memory.** Restarting the agent (the background
-  process that runs syncs for the app and the CLI) forgets it, and the
-  next preview shows the change again
-  ([ADR 0023](../adr/0023-conflict-resolution.md)).
 - A folder deleted on one side cannot be removed on the other while it
   still holds excluded entries; that removal fails and is reported
   ([ADR 0024](../adr/0024-filters.md)).

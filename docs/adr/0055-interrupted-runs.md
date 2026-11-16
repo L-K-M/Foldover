@@ -45,10 +45,11 @@ Two designs were reviewed and rejected:
   row gets. Admitting replaces the row of the run before, so no older
   run's row outlives a newer one. Previews and undos are not admitted.
 - **Every result ends it.** When a job's result publishes, after any
-  panic is caught: a finished run, or one a person cancelled, deletes the
-  row; any other result (needs approval, failed, crashed) marks it
-  `ended`, so the next run still continues its journal but nothing
-  resumes it. Only a run the agent never saw end stays `running`.
+  panic is caught, one that poisoned the engine's lock included: a
+  finished run, or one a person cancelled, deletes the row; any other
+  result (needs approval, failed, crashed) marks it `ended`, so the next
+  run still continues its journal but nothing resumes it. Only a run the
+  agent never saw end stays `running`.
 - **A start finds it.** At an agent start, before the scheduler runs,
   every `running` row becomes `interrupted` and the pair's status is
   `interrupted` (local protocol 24), with when the run started and
@@ -61,7 +62,10 @@ Two designs were reviewed and rejected:
   through the same holds as every automatic sync (safe mode, the global
   pause, pair pauses, the hold after an undo, Low Power Mode and costly
   networks). Cancelling an interrupted pair declines it: the row is
-  deleted and nothing continues it.
+  deleted and nothing continues it. A preview or an undo of the pair
+  takes the interrupted sync's place: its row is marked `ended`, so
+  nothing continues it, in this agent or after the next start, and the
+  next run still continues its journal.
   - A scheduled run continues as a scheduled one.
   - A person's sync continues as `Work::Resume`: at full effort, with
     the share remount and the manual history trigger, like the person's
@@ -87,8 +91,11 @@ Two designs were reviewed and rejected:
     no longer put back what the oldest one held.
   - Starts after an unclean stop count against the row, and a run
     continuing an interrupted one inherits the count. After two, the run
-    no longer continues by itself and waits for a person. Clean stops,
-    including reboots, never count.
+    no longer continues by itself and waits for a person. Its pair's
+    schedule waits with it: a killed run leaves no history row, so the
+    pair stays due and the schedule would start the same work at every
+    agent start. A person's sync, preview or dismissal lifts the wait.
+    Clean stops, including reboots, never count.
   - Activating a saved edit that changes roots or metadata categories
     deletes the row with the base and journal: nothing is left to
     continue.
@@ -100,6 +107,21 @@ Two designs were reviewed and rejected:
   `sync.status`.
 - A backup continues at once instead of at its next interval or the
   person's next sync, and Undo after it reverts the whole logical sync.
+- A killed run gets less than that. A crash or a power loss kills one,
+  and so does a logout or a restart during a sync that needs longer
+  than launchd's exit timeout: a stopping agent lets its sync run on
+  until launchd kills it. The run continuing it first watches each
+  lease it needs that the dead run left, for two minutes and however
+  long ago that run died: a lease counts as dead only once its reader
+  has seen it unchanged that long ([ADR 0032](0032-root-leases.md)).
+  That is about two minutes for a Backup or a Mirror, which leases its
+  target, and about four for a two-way Sync, which leases both folders
+  one after the other. And what the killed run wrote after
+  its last commit, up to a batch of 256 entries and the copies then in
+  flight ([ADR 0020](0020-run-execution.md)), is in no journal: the
+  continuing run finds those paths equal on both sides, and Undo leaves
+  them as the killed run left them. A version it replaced or removed
+  there stays in its archive folder.
 - A resumed sync of a pair an undo holds does not start: the hold keeps
   every automatic start out until a person syncs.
 - A path written by both an interrupted run and the run continuing it

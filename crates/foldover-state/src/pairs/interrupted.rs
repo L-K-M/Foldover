@@ -95,6 +95,13 @@ impl PairStore {
     pub fn forget_interrupted(&mut self, id: PairId) -> Result<(), Error> {
         Ok(self.database.forget_interrupted(id.as_bytes())?)
     }
+
+    /// A job that is not admitted took the place of the pair's
+    /// interrupted run: the next run still continues its journal, but
+    /// nothing resumes it.
+    pub fn end_interrupted(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.database.end_interrupted(id.as_bytes())?)
+    }
 }
 
 fn interrupted(row: InterruptedRow) -> Result<InterruptedRun, Error> {
