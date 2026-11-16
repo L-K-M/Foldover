@@ -61,10 +61,12 @@ impl Source<'_> {
         }
     }
 
-    /// Push the file's data from byte `from`; a failure carries the
-    /// endpoint's error out through `error`, since the sink only speaks
-    /// `io::Error`. Another Mac was asked for that offset when the
-    /// source was opened.
+    /// Push the file's data from byte `from`; a failure of the source
+    /// carries the endpoint's error out through `error`, since the sink
+    /// only speaks `io::Error`. A failure of the sink is the
+    /// destination's and comes back as it was, with `error` left empty:
+    /// the source's reader would report it as its own. Another Mac was
+    /// asked for that offset when the source was opened.
     fn push(
         &self,
         path: &SyncPath,
@@ -81,6 +83,9 @@ impl Source<'_> {
         // A cancel during a wait reaches the source as a failed write, so
         // it is noted here to come out as the cancel it is.
         let cancelled = Cell::new(false);
+        // What the destination failed a chunk with, kept here while the
+        // source's reader unwinds with a stand-in.
+        let refused = RefCell::new(None);
         let mut checked = || {
             let state = (*control.borrow_mut())();
             if state == ScanControl::Cancel {
@@ -96,7 +101,11 @@ impl Source<'_> {
                 cancelled.set(true);
                 return Err(io::Error::other("cancelled"));
             }
-            sink(chunk)
+            sink(chunk).map_err(|error| {
+                let kind = error.kind();
+                *refused.borrow_mut() = Some(error);
+                io::Error::from(kind)
+            })
         };
         let (control, sink) = (&mut checked, &mut paced);
         let pushed = match self {
@@ -114,6 +123,11 @@ impl Source<'_> {
             Self::Peer(source) => source.push(path, control, sink).map(|()| None),
         };
         pushed.map_err(|failure| {
+            if !cancelled.get()
+                && let Some(destination) = refused.take()
+            {
+                return destination;
+            }
             *error.borrow_mut() = Some(match cancelled.get() {
                 true => ApplyError::Scan(ScanError::Cancelled),
                 false => failure,
@@ -512,16 +526,32 @@ fn send_on(
             // the whole file stands for the bytes the server kept.
             let whole = Cell::new(None);
             let staged = match partial {
-                Some(partial) => remote.upload_partial_on(
-                    session,
-                    partial,
-                    synced_mode(DEFAULT_FILE),
-                    options.durability(),
-                    |start, sink| {
-                        whole.set(source.push(path, start, run, control, sink, &failure)?);
-                        Ok(())
-                    },
-                ),
+                Some(partial) => {
+                    let staged = remote.upload_partial_on(
+                        session,
+                        partial,
+                        synced_mode(DEFAULT_FILE),
+                        options.durability(),
+                        |start, sink| {
+                            whole.set(source.push(path, start, run, control, sink, &failure)?);
+                            Ok(())
+                        },
+                    );
+                    // The next copy of this content takes up what this one
+                    // staged without reading it (ADR 0058), so the file may
+                    // stay only while it is taken to hold that content:
+                    // when a person or the server stopped the copy. A
+                    // source that failed while it was read, changed for
+                    // one, may have sent other bytes.
+                    let source_failed = matches!(
+                        *failure.borrow(),
+                        Some(ref failure) if !matches!(failure, ApplyError::Scan(ScanError::Cancelled))
+                    );
+                    if staged.is_err() && source_failed {
+                        remote.discard_on(session, &partial.remote);
+                    }
+                    staged
+                }
                 None => remote.upload_on(
                     session,
                     path.as_bytes(),

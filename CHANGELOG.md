@@ -52,6 +52,9 @@ All notable changes to this project are documented here. The format follows
   response".
 - A Mac advertising pairing on port 0 is ignored instead of being listed
   as open for pairing.
+- A copy to an SFTP server that stops because the connection broke off
+  is reported as a failed write. It used to say the source changed since
+  the preview.
 
 ### Changed
 

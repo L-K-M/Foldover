@@ -3075,7 +3075,7 @@ struct Resumable {
     local: Endpoint,
     remote: Endpoint,
     remote_directory: tempfile::TempDir,
-    _local_directory: tempfile::TempDir,
+    local_directory: tempfile::TempDir,
     _logs: tempfile::TempDir,
     log: PathBuf,
     entry: ObservedEntry,
@@ -3083,12 +3083,22 @@ struct Resumable {
 }
 
 fn resumable() -> Option<Resumable> {
-    let local_directory = tempfile::tempdir().unwrap();
     let remote_directory = tempfile::tempdir().unwrap();
     fs::create_dir(remote_directory.path().join(".foldover")).unwrap();
     let logs = tempfile::tempdir().unwrap();
+    let remote = counted(remote_directory.path(), &logs.path().join("packets"))?;
+    Some(resumable_over(remote, remote_directory, logs))
+}
+
+/// `resumable` over `remote`, a server on `remote_directory`.
+fn resumable_over(
+    remote: SftpEndpoint,
+    remote_directory: tempfile::TempDir,
+    logs: tempfile::TempDir,
+) -> Resumable {
+    let local_directory = tempfile::tempdir().unwrap();
     let log = logs.path().join("packets");
-    let remote = Endpoint::Sftp(counted(remote_directory.path(), &log)?);
+    let remote = Endpoint::Sftp(remote);
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let content = resumable_content();
     fs::write(local_directory.path().join("big"), &content).unwrap();
@@ -3102,16 +3112,16 @@ fn resumable() -> Option<Resumable> {
         )
         .unwrap();
     let entry = here.entries()[&path(b"big")].clone();
-    Some(Resumable {
+    Resumable {
         local,
         remote,
         remote_directory,
-        _local_directory: local_directory,
+        local_directory,
         _logs: logs,
         log,
         entry,
         content,
-    })
+    }
 }
 
 impl Resumable {
@@ -3239,6 +3249,143 @@ fn a_cancelled_copy_to_a_server_keeps_its_partial_for_the_next() {
         pair.content
     );
     assert!(!partial.exists());
+}
+
+/// A server that goes away during a copy stopped it, and the source did
+/// not: the failure is the write's, and what the server kept stays for
+/// the next copy, which finishes it over a new session.
+#[test]
+fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
+    let Some(server) = server() else { return };
+    let remote_directory = tempfile::tempdir().unwrap();
+    fs::create_dir(remote_directory.path().join(".foldover")).unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    // Each session's process id stays its shell's through `exec`.
+    let pid = logs.path().join("pid");
+    let script = format!(
+        "echo $$ > '{pid}'; exec '{server}' -d /",
+        pid = pid.display(),
+        server = server.display()
+    );
+    let remote = SftpEndpoint::spawn(
+        Path::new("/bin/sh"),
+        &[OsStr::new("-c"), OsStr::new(&script)],
+        remote_directory.path().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let pair = resumable_over(remote, remote_directory, logs);
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    let partial = pair.partial();
+
+    let mut killed = false;
+    let stopped = pair.remote.copy_from(
+        &pair.local,
+        &path(b"big"),
+        &pair.entry,
+        Expected::Absent,
+        &run,
+        &mut || {
+            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+            if !killed && staged >= 4 * 1024 * 1024 {
+                let id = fs::read_to_string(&pid).unwrap();
+                std::process::Command::new("kill")
+                    .args(["-9", id.trim()])
+                    .status()
+                    .unwrap();
+                killed = true;
+            }
+            ScanControl::Continue
+        },
+    );
+    assert!(
+        matches!(stopped, Err(ApplyError::Write { .. })),
+        "{stopped:?}"
+    );
+    let kept = fs::metadata(&partial).unwrap().len();
+    assert!(
+        (4 * 1024 * 1024..RESUMABLE as u64).contains(&kept),
+        "{kept}"
+    );
+
+    pair.copy(&run).unwrap();
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
+    assert!(!partial.exists());
+}
+
+/// The next copy of a content takes up what a stopped one staged without
+/// reading it, so a copy whose source changed while it was read keeps
+/// nothing: it may have sent bytes of neither version. Here the file
+/// then holds the planned content again, as a duplicate of it elsewhere
+/// in the folder would.
+#[test]
+fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    const MIB: usize = 1024 * 1024;
+    // Well past what the copy has read once 4 MiB reached the server.
+    const EDITED: std::ops::Range<usize> = 12 * MIB..13 * MIB;
+
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    let partial = pair.partial();
+    let big = pair.local_directory.path().join("big");
+    let overwrite = |bytes: &[u8]| {
+        let mut file = fs::File::options().write(true).open(&big).unwrap();
+        file.seek(SeekFrom::Start(EDITED.start as u64)).unwrap();
+        file.write_all(bytes).unwrap();
+    };
+    let mut changed = false;
+    let stopped = pair.remote.copy_from(
+        &pair.local,
+        &path(b"big"),
+        &pair.entry,
+        Expected::Absent,
+        &run,
+        &mut || {
+            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+            if !changed && staged >= 4 * MIB as u64 {
+                overwrite(&vec![0xa5; EDITED.len()]);
+                changed = true;
+            }
+            ScanControl::Continue
+        },
+    );
+    assert!(
+        matches!(stopped, Err(ApplyError::SourceChanged(_))),
+        "{stopped:?}"
+    );
+    assert!(!partial.exists());
+
+    overwrite(&pair.content[EDITED]);
+    let here = pair
+        .local
+        .observe_from(
+            PairOptions::default().metadata(),
+            &Filter::none(),
+            &BTreeMap::new(),
+            &mut proceed,
+            &mut |_| {},
+        )
+        .unwrap();
+    let entry = &here.entries()[&path(b"big")];
+    assert_eq!(entry.version().content(), pair.entry.version().content());
+    pair.remote
+        .copy_from(
+            &pair.local,
+            &path(b"big"),
+            entry,
+            Expected::Absent,
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    assert_eq!(
+        fs::read(pair.remote_directory.path().join("big")).unwrap(),
+        pair.content
+    );
 }
 
 /// Partials follow the archive's retention.

@@ -20,9 +20,12 @@ file again.
   `.foldover/partial/<content digest>`, as ADR 0034 names local
   partials, and renamed into place when whole. A stop at any point, a
   kill included, leaves it there; the leftover pass never looks inside
-  `.foldover`. A folder that keeps no records stages beside the file and
-  keeps nothing. Two copies of one content in a run never share the
-  file: the second stages beside its destination.
+  `.foldover`. A copy whose source fails while it is read, changed for
+  one, removes it: the file may hold bytes of neither version, and the
+  next copy of the content would take them up unread. A folder that
+  keeps no records stages beside the file and keeps nothing. Two copies
+  of one content in a run never share the file: the second stages
+  beside its destination.
 - **Resume after what the server acknowledged.** The writer sends a new
   write only once the oldest of 16 in flight was answered, so every byte
   more than 16 × 32 KiB before the kept file's end was acknowledged,
@@ -54,3 +57,10 @@ file again.
   is discarded, as before; the checks before it catch the usual cause.
 - An abandoned partial occupies server space until the next copy of the
   same content or the archive's retention.
+- Still open: a copy stopped by a kill, a cancel or a lost connection
+  while its source was being modified never reaches the check that
+  follows its read, so what it staged is kept unchecked. The modified
+  file has other content afterwards and never takes that partial up; a
+  later copy of the old content would, for example of a duplicate or of
+  the file put back as it was. Tying a partial to its source file's
+  identity and change time would rule that out.
