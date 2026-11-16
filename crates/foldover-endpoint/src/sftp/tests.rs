@@ -397,16 +397,31 @@ sys.exit(0)
 /// A proxy that lists every root entry twice and fails the second listing
 /// of `parent`, so the folder's children are hashed before its late listing
 /// failure covers them. The final unavailable-prefix retain must drop them.
+///
+/// Every session is its own proxy process, and the walk's second listing
+/// opens another session whenever a reader holds the first. The first
+/// listing therefore leaves a mark on disk, at the path given before the
+/// server's command, for whichever session is asked next.
 const LATE_LISTING_PROXY: &str = r#"
-import struct, subprocess, sys, threading
+import os, struct, subprocess, sys, threading
 
-child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+listed = sys.argv[1]
+child = subprocess.Popen(sys.argv[2:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 lock = threading.Lock()
 opened = {}
 handles = {}
 listing = {}
-counts = {}
-root = [None]
+PARENT = b"/parent"
+
+
+def late(path):
+    if not path.endswith(PARENT):
+        return False
+    try:
+        os.mkdir(listed)
+    except FileExistsError:
+        return True
+    return False
 
 
 def packet(stream):
@@ -437,11 +452,7 @@ def requests():
             path, _ = string(body, 5)
             with lock:
                 opened[request] = path
-                if root[0] is None:
-                    root[0] = path
-                counts[path] = counts.get(path, 0) + 1
-                late = path.endswith(b"/parent") and counts[path] > 1
-            if late:
+            if late(path):
                 status = (
                     bytes([101])
                     + struct.pack(">I", request)
@@ -482,8 +493,8 @@ while True:
     elif kind == 104:  # SSH_FXP_NAME
         request = struct.unpack(">I", body[1:5])[0]
         with lock:
-            duplicate = listing.get(request) is not None and listing.get(request) == root[0]
-        if duplicate:
+            path = listing.get(request)
+        if path is not None and not path.endswith(PARENT):
             (count,) = struct.unpack(">I", body[5:9])
             entries = body[9:]
             body = body[:5] + struct.pack(">I", count * 2) + entries + entries
@@ -495,6 +506,16 @@ child.wait()
 "#;
 
 fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoint> {
+    proxy_given(directory, script, &[], description)
+}
+
+/// `proxy`, handing the script `given` before the server's command.
+fn proxy_given(
+    directory: &Path,
+    script: &str,
+    given: &[&OsStr],
+    description: &str,
+) -> Option<SftpEndpoint> {
     let python = std::process::Command::new("python3")
         .arg("--version")
         .status()
@@ -505,13 +526,11 @@ fn proxy(directory: &Path, script: &str, description: &str) -> Option<SftpEndpoi
         eprintln!("python3 or sftp-server missing; {description} fixture skipped");
         return None;
     };
-    let arguments = [
-        OsStr::new("-c"),
-        OsStr::new(script),
-        server.as_os_str(),
-        OsStr::new("-d"),
-        OsStr::new("/"),
-    ];
+    let arguments: Vec<&OsStr> = [OsStr::new("-c"), OsStr::new(script)]
+        .into_iter()
+        .chain(given.iter().copied())
+        .chain([server.as_os_str(), OsStr::new("-d"), OsStr::new("/")])
+        .collect();
     let root = directory.as_os_str().as_encoded_bytes();
     Some(SftpEndpoint::spawn(&python, &arguments, root).unwrap())
 }
@@ -766,10 +785,16 @@ fn checks_land_while_a_nested_tree_is_still_being_listed() {
 /// as the streamed local walk does.
 #[test]
 fn a_late_parent_listing_failure_suppresses_its_hashed_children() {
-    let directory = tempfile::tempdir().unwrap();
+    let (directory, sessions) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     fs::create_dir(directory.path().join("parent")).unwrap();
     fs::write(directory.path().join("parent/child"), b"payload").unwrap();
-    let Some(remote) = proxy(directory.path(), LATE_LISTING_PROXY, "late listing") else {
+    let listed = sessions.path().join("listed");
+    let Some(remote) = proxy_given(
+        directory.path(),
+        LATE_LISTING_PROXY,
+        &[listed.as_os_str()],
+        "late listing",
+    ) else {
         return;
     };
     let observed = remote
