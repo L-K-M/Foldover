@@ -4041,7 +4041,8 @@ fn undo_forgets_the_observations_of_what_it_writes() {
 }
 
 /// What a run's commits did to the stored observations: the paths whose
-/// rows they replaced, and those whose rows they dropped, each in order.
+/// rows they replaced, and those whose rows they dropped, each sorted by
+/// side and then path.
 struct Observations {
     report: RunReport,
     stored: Vec<(Side, SyncPath)>,

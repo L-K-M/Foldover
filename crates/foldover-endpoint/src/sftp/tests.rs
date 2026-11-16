@@ -3105,6 +3105,9 @@ struct Resumable {
     log: PathBuf,
     entry: ObservedEntry,
     content: Vec<u8>,
+    /// When `copy` and `copy_with` begin: an hour after the fixture wrote
+    /// `big`, since nothing a test does makes a change time old.
+    later: SystemTime,
 }
 
 fn resumable() -> Option<Resumable> {
@@ -3128,13 +3131,16 @@ fn resumable_over(
     let content = resumable_content();
     let big = local_directory.path().join("big");
     fs::write(&big, &content).unwrap();
-    // A file changed moments ago stages nothing another copy continues.
+    // A file modified or changed moments ago stages nothing another copy
+    // continues: the modification time is put back, and `later` is past
+    // the change time that doing so leaves.
     fs::File::options()
         .write(true)
         .open(&big)
         .unwrap()
         .set_modified(SystemTime::now() - Duration::from_secs(60))
         .unwrap();
+    let later = SystemTime::now() + Duration::from_secs(60 * 60);
     let here = local
         .observe_from(
             PairOptions::default().metadata(),
@@ -3154,6 +3160,7 @@ fn resumable_over(
         log,
         entry,
         content,
+        later,
     }
 }
 
@@ -3172,8 +3179,8 @@ impl Resumable {
         let entry = local
             .source_entry(&path(b"big"), &self.entry, &run, &mut proceed)
             .unwrap();
-        let state = LocalEndpoint::source_state(&entry, SystemTime::now())
-            .expect("the fixture's file is settled");
+        let state = LocalEndpoint::source_state(&entry, self.later)
+            .expect("the fixture's file is settled by then");
         let claimed = remote
             .claim_partial(content, state, self.entry.size())
             .unwrap();
@@ -3196,13 +3203,25 @@ impl Resumable {
     }
 
     fn copy(&self, run: &RunScope) -> Result<EntryVersion, ApplyError> {
-        self.remote.copy_from(
+        self.copy_with(&self.entry, run, &mut proceed)
+    }
+
+    /// Copy `big`, planned as `entry`, to the server at `later`.
+    fn copy_with(
+        &self,
+        entry: &ObservedEntry,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ApplyError> {
+        transfer::copy_at(
+            self.later,
+            &self.remote,
             &self.local,
             &path(b"big"),
-            &self.entry,
+            entry,
             Expected::Absent,
             run,
-            &mut proceed,
+            control,
         )
     }
 }
@@ -3276,17 +3295,10 @@ fn a_cancelled_copy_to_a_server_keeps_its_partial_for_the_next() {
     let Some(pair) = resumable() else { return };
     let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
     let partial = pair.partial();
-    let stopped = pair.remote.copy_from(
-        &pair.local,
-        &path(b"big"),
-        &pair.entry,
-        Expected::Absent,
-        &run,
-        &mut || match fs::metadata(&partial) {
-            Ok(staged) if staged.len() >= 4 * 1024 * 1024 => ScanControl::Cancel,
-            _ => ScanControl::Continue,
-        },
-    );
+    let stopped = pair.copy_with(&pair.entry, &run, &mut || match fs::metadata(&partial) {
+        Ok(staged) if staged.len() >= 4 * 1024 * 1024 => ScanControl::Cancel,
+        _ => ScanControl::Continue,
+    });
     assert!(matches!(
         stopped,
         Err(ApplyError::Scan(ScanError::Cancelled))
@@ -3360,21 +3372,14 @@ fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
     let partial = pair.partial();
 
     let mut killed = false;
-    let stopped = pair.remote.copy_from(
-        &pair.local,
-        &path(b"big"),
-        &pair.entry,
-        Expected::Absent,
-        &run,
-        &mut || {
-            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
-            if !killed && staged >= 4 * 1024 * 1024 {
-                stop_server(&pid);
-                killed = true;
-            }
-            ScanControl::Continue
-        },
-    );
+    let stopped = pair.copy_with(&pair.entry, &run, &mut || {
+        let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+        if !killed && staged >= 4 * 1024 * 1024 {
+            stop_server(&pid);
+            killed = true;
+        }
+        ScanControl::Continue
+    });
     assert!(
         matches!(stopped, Err(ApplyError::Write { .. })),
         "{stopped:?}"
@@ -3409,21 +3414,14 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
     let partial = pair.partial();
     let big = pair.local_directory.path().join("big");
     let mut changed = false;
-    let stopped = pair.remote.copy_from(
-        &pair.local,
-        &path(b"big"),
-        &pair.entry,
-        Expected::Absent,
-        &run,
-        &mut || {
-            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
-            if !changed && staged >= 4 * MIB as u64 {
-                write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
-                changed = true;
-            }
-            ScanControl::Continue
-        },
-    );
+    let stopped = pair.copy_with(&pair.entry, &run, &mut || {
+        let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+        if !changed && staged >= 4 * MIB as u64 {
+            write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
+            changed = true;
+        }
+        ScanControl::Continue
+    });
     assert!(
         matches!(stopped, Err(ApplyError::SourceChanged(_))),
         "{stopped:?}"
@@ -3443,16 +3441,7 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
         .unwrap();
     let entry = &here.entries()[&path(b"big")];
     assert_eq!(entry.version().content(), pair.entry.version().content());
-    pair.remote
-        .copy_from(
-            &pair.local,
-            &path(b"big"),
-            entry,
-            Expected::Absent,
-            &run,
-            &mut proceed,
-        )
-        .unwrap();
+    pair.copy_with(entry, &run, &mut proceed).unwrap();
     assert_eq!(
         fs::read(pair.remote_directory.path().join("big")).unwrap(),
         pair.content
@@ -3480,25 +3469,18 @@ fn a_stopped_copy_is_not_continued_once_its_source_was_written() {
     let modified = fs::metadata(&big).unwrap().modified().unwrap();
 
     let (mut changed, mut killed) = (false, false);
-    let stopped = pair.remote.copy_from(
-        &pair.local,
-        &path(b"big"),
-        &pair.entry,
-        Expected::Absent,
-        &run,
-        &mut || {
-            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
-            if !changed && staged >= 4 * MIB as u64 {
-                write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
-                changed = true;
-            }
-            if !killed && staged >= 16 * MIB as u64 {
-                stop_server(&pid);
-                killed = true;
-            }
-            ScanControl::Continue
-        },
-    );
+    let stopped = pair.copy_with(&pair.entry, &run, &mut || {
+        let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+        if !changed && staged >= 4 * MIB as u64 {
+            write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
+            changed = true;
+        }
+        if !killed && staged >= 16 * MIB as u64 {
+            stop_server(&pid);
+            killed = true;
+        }
+        ScanControl::Continue
+    });
     assert!(
         matches!(stopped, Err(ApplyError::Write { .. })),
         "{stopped:?}"
@@ -3522,16 +3504,7 @@ fn a_stopped_copy_is_not_continued_once_its_source_was_written() {
         .unwrap();
     let entry = pair.observed();
     assert_eq!(entry.version(), pair.entry.version());
-    pair.remote
-        .copy_from(
-            &pair.local,
-            &path(b"big"),
-            &entry,
-            Expected::Absent,
-            &run,
-            &mut proceed,
-        )
-        .unwrap();
+    pair.copy_with(&entry, &run, &mut proceed).unwrap();
     let placed = fs::read(pair.remote_directory.path().join("big")).unwrap();
     assert!(
         placed == pair.content,
@@ -3545,7 +3518,8 @@ fn a_stopped_copy_is_not_continued_once_its_source_was_written() {
 
 /// A file modified within what its timestamps resolve could be written
 /// again unseen, so its copy stages beside the destination and leaves
-/// nothing for a later one to continue.
+/// nothing for a later one to continue. Its change time is an hour old
+/// by the fixture's clock: the modification time alone is recent.
 #[test]
 fn a_file_modified_moments_ago_stages_beside_its_destination() {
     let Some(pair) = resumable() else { return };
@@ -3554,13 +3528,35 @@ fn a_file_modified_moments_ago_stages_beside_its_destination() {
         .write(true)
         .open(pair.local_directory.path().join("big"))
         .unwrap()
-        .set_modified(SystemTime::now())
+        .set_modified(pair.later - Duration::from_secs(1))
         .unwrap();
+    pair.copy_with(&pair.observed(), &run, &mut proceed)
+        .unwrap();
+    assert!(
+        !pair
+            .remote_directory
+            .path()
+            .join(".foldover/partial")
+            .exists()
+    );
+    let placed = fs::read(pair.remote_directory.path().join("big")).unwrap();
+    assert!(placed == pair.content);
+}
+
+/// A write that puts the modification time back shows in the change time
+/// alone, and a clock in coarse ticks gives another such write within the
+/// tick the same one. So a file changed moments ago stages beside its
+/// destination too, however old its modification time: the fixture wrote
+/// the file and set that back a minute just now.
+#[test]
+fn a_file_changed_moments_ago_stages_beside_its_destination() {
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
     pair.remote
         .copy_from(
             &pair.local,
             &path(b"big"),
-            &pair.observed(),
+            &pair.entry,
             Expected::Absent,
             &run,
             &mut proceed,

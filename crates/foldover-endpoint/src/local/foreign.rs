@@ -57,19 +57,23 @@ impl LocalEndpoint {
     }
 
     /// The state of a verified file, for staging its copy where nothing
-    /// hashes what was kept. `None` while the file was modified too
-    /// recently for its timestamps to show another write: such a copy
-    /// stages nothing a later one could take up.
+    /// hashes what was kept. `None` while the file was modified or changed
+    /// too recently, by `now`, for its timestamps to show another write:
+    /// such a copy stages nothing a later one could take up. The change
+    /// time counts because a write that puts the modification time back
+    /// shows in it alone, and a clock in coarse ticks gives a further such
+    /// write within the tick the same one.
     pub(crate) fn source_state(entry: &LocalEntry, now: SystemTime) -> Option<SourceState> {
-        let settled = now
-            .duration_since(entry.metadata.modified())
-            .is_ok_and(|age| age >= RACY_WINDOW);
-        settled.then(|| {
-            let state = blake3::hash(&entry.metadata.data_key());
-            let mut bytes = [0; SOURCE_STATE_BYTES];
-            bytes.copy_from_slice(&state.as_bytes()[..SOURCE_STATE_BYTES]);
-            SourceState(bytes)
-        })
+        let settled =
+            |time: SystemTime| now.duration_since(time).is_ok_and(|age| age >= RACY_WINDOW);
+        let metadata = &entry.metadata;
+        if !settled(metadata.modified()) || !metadata.changed().is_some_and(settled) {
+            return None;
+        }
+        let state = blake3::hash(&metadata.data_key());
+        let mut bytes = [0; SOURCE_STATE_BYTES];
+        bytes.copy_from_slice(&state.as_bytes()[..SOURCE_STATE_BYTES]);
+        Some(SourceState(bytes))
     }
 
     pub(crate) fn foreign_metadata(entry: &LocalEntry) -> ForeignMetadata {

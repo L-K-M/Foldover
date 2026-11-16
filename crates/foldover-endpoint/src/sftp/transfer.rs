@@ -148,6 +148,32 @@ pub(crate) fn copy(
     run: &RunScope,
     control: &mut impl FnMut() -> ScanControl,
 ) -> Result<EntryVersion, ApplyError> {
+    copy_at(
+        SystemTime::now(),
+        to,
+        from,
+        path,
+        planned,
+        current,
+        run,
+        control,
+    )
+}
+
+/// `copy` begun at `began`, the time its source's timestamps are judged
+/// by. A test passes a later one, since nothing it does makes a change
+/// time old.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_at(
+    began: SystemTime,
+    to: &Endpoint,
+    from: &Endpoint,
+    path: &SyncPath,
+    planned: &ObservedEntry,
+    current: Expected<'_>,
+    run: &RunScope,
+    control: &mut impl FnMut() -> ScanControl,
+) -> Result<EntryVersion, ApplyError> {
     if let Endpoint::Sftp(_) = to {
         super::check_durability(run.options().durability(), path)?;
     }
@@ -235,7 +261,7 @@ pub(crate) fn copy(
                 (Source::Local(_, entry), Archiving::Kept, EntryContent::File(content))
                     if planned.size() >= PARTIAL_MIN_BYTES =>
                 {
-                    crate::LocalEndpoint::source_state(entry, SystemTime::now())
+                    crate::LocalEndpoint::source_state(entry, began)
                         .and_then(|state| remote.claim_partial(content, state, planned.size()))
                 }
                 _ => None,

@@ -33,10 +33,12 @@ file again.
   as the copy found them on the file it opened. Every write to the file
   moves its change time, so only a copy of that file, not written
   since, finds the staged file: a duplicate, or the file put back as it
-  was, stages anew. A file modified within the last 3 s, where a coarse
-  timestamp could hide another write, stages beside its destination and
-  keeps nothing. A copy whose source fails while it is read, changed
-  for one, removes what it staged: nothing would continue it.
+  was, stages anew. A file whose modification or change time lies within
+  the last 3 s, where a coarse timestamp could hide another write,
+  stages beside its destination and keeps nothing. The change time
+  counts because a write that puts the modification time back shows in
+  it alone. A copy whose source fails while it is read, changed for
+  one, removes what it staged: nothing would continue it.
 - **Resume after what the server acknowledged.** The writer sends a new
   write only once the oldest of 16 in flight was answered, so every byte
   more than 16 × 32 KiB before the kept file's end was acknowledged,
@@ -71,7 +73,14 @@ file again.
 - A file whose change time moved between the stop and the next copy,
   by a permission change for example, starts over, as does the same
   content copied from another file.
+- A file written, renamed or given other permissions in the 3 s before
+  its copy begins stages beside its destination: that copy starts over
+  if it is stopped, and the next one stages where it can continue.
+- Where a volume numbers its files anew each time it is mounted, a
+  staged upload is not found after a remount, and the copy starts over.
 - The source state is as exact as the file system's stat. Where a file
   system keeps no change time of its own, a rewrite that restores size
   and modification time is not seen, as in a local folder's observation
-  (PLAN.md §4.8).
+  (PLAN.md §4.8). On a share, the server's clock sets both times and
+  this Mac's measures the 3 s, so that margin shrinks by however far the
+  server runs behind.

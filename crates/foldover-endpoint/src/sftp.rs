@@ -1170,7 +1170,8 @@ impl SftpEndpoint {
     /// Writes are trusted once acknowledged, and only an interrupted
     /// write window past them is sent again: every byte more than
     /// `WRITE_WINDOW_BYTES` before the kept file's end was acknowledged.
-    /// A failed write keeps the file for the next copy of this content.
+    /// A failed write keeps the file for the next copy of this file,
+    /// not written since.
     fn upload_partial_on(
         &self,
         session: &mut Session,

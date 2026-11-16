@@ -2191,7 +2191,8 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(matches!(service.jobs.status(id), SyncStatus::Failed { .. }));
+        let ended = service.jobs.status(id);
+        assert!(matches!(ended, SyncStatus::Failed { .. }), "{ended:?}");
 
         assert!(
             service

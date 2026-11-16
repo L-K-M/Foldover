@@ -156,6 +156,12 @@ impl EntryMetadata {
         self.modified
     }
 
+    /// When the entry's data or attributes last changed, by its file
+    /// system's clock; `None` when the stat's change time is no valid time.
+    pub fn changed(&self) -> Option<SystemTime> {
+        modified_time(self.changed.0, self.changed.1).ok()
+    }
+
     pub fn identity(&self) -> FileIdentity {
         self.identity
     }
