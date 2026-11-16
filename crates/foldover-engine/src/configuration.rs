@@ -490,6 +490,13 @@ impl Engine {
         Ok(self.pairs.forget_interrupted(id)?)
     }
 
+    /// A job that is not admitted, a preview or an undo, took the place
+    /// of the pair's interrupted run (ADR 0055): the next run still
+    /// continues its journal, but nothing resumes it.
+    pub fn end_interrupted(&mut self, id: PairId) -> Result<(), Error> {
+        Ok(self.pairs.end_interrupted(id)?)
+    }
+
     /// Whether the pair has completed a first sync, which records identities.
     pub fn first_synced(&self, id: PairId) -> Result<bool, Error> {
         let identities = self.pairs.identities(id)?;

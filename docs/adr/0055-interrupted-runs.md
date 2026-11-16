@@ -45,10 +45,11 @@ Two designs were reviewed and rejected:
   row gets. Admitting replaces the row of the run before, so no older
   run's row outlives a newer one. Previews and undos are not admitted.
 - **Every result ends it.** When a job's result publishes, after any
-  panic is caught: a finished run, or one a person cancelled, deletes the
-  row; any other result (needs approval, failed, crashed) marks it
-  `ended`, so the next run still continues its journal but nothing
-  resumes it. Only a run the agent never saw end stays `running`.
+  panic is caught, one that poisoned the engine's lock included: a
+  finished run, or one a person cancelled, deletes the row; any other
+  result (needs approval, failed, crashed) marks it `ended`, so the next
+  run still continues its journal but nothing resumes it. Only a run the
+  agent never saw end stays `running`.
 - **A start finds it.** At an agent start, before the scheduler runs,
   every `running` row becomes `interrupted` and the pair's status is
   `interrupted` (local protocol 24), with when the run started and
@@ -61,7 +62,10 @@ Two designs were reviewed and rejected:
   through the same holds as every automatic sync (safe mode, the global
   pause, pair pauses, the hold after an undo, Low Power Mode and costly
   networks). Cancelling an interrupted pair declines it: the row is
-  deleted and nothing continues it.
+  deleted and nothing continues it. A preview or an undo of the pair
+  takes the interrupted sync's place: its row is marked `ended`, so
+  nothing continues it, in this agent or after the next start, and the
+  next run still continues its journal.
   - A scheduled run continues as a scheduled one.
   - A person's sync continues as `Work::Resume`: at full effort, with
     the share remount and the manual history trigger, like the person's
@@ -87,8 +91,11 @@ Two designs were reviewed and rejected:
     no longer put back what the oldest one held.
   - Starts after an unclean stop count against the row, and a run
     continuing an interrupted one inherits the count. After two, the run
-    no longer continues by itself and waits for a person. Clean stops,
-    including reboots, never count.
+    no longer continues by itself and waits for a person. Its pair's
+    schedule waits with it: a killed run leaves no history row, so the
+    pair stays due and the schedule would start the same work at every
+    agent start. A person's sync, preview or dismissal lifts the wait.
+    Clean stops, including reboots, never count.
   - Activating a saved edit that changes roots or metadata categories
     deletes the row with the base and journal: nothing is left to
     continue.

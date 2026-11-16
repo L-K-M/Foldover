@@ -95,11 +95,14 @@ All notable changes to this project are documented here. The format follows
   it still stops to ask before removing more than 50 items and 1% of a
   folder, or whenever the pair requires review, and it waits for you if
   you changed the pair's settings meanwhile. Choose Don't Resume in the
-  sidebar's menu, or run `foldover sync ID --cancel`, to decline it. Undo
-  after the continued sync reverts all of it, not only the part after the
-  restart, and "skip in the next run" choices now survive a restart. A
-  sync that keeps crashing the agent stops continuing by itself after two
-  attempts (local protocol 24, schema v32, ADR 0055).
+  sidebar's menu, or run `foldover sync ID --cancel`, to decline it;
+  previewing or undoing the pair also keeps it from continuing by
+  itself. Undo after the continued sync reverts all of it, not only the
+  part after the restart, and "skip in the next run" choices now survive
+  a restart. A sync that keeps crashing the agent stops continuing by
+  itself after two attempts, and its pair's schedule waits with it until
+  you sync, preview or dismiss the pair (local protocol 24, schema v32,
+  ADR 0055).
 - Pause Pair and Resume Pair, in the sidebar's menu and the Pair menu, and
   `foldover pairs pause|resume ID`: a paused pair's automatic syncs wait
   until you resume it, while Sync Now still works.
