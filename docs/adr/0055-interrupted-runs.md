@@ -110,9 +110,13 @@ Two designs were reviewed and rejected:
 - A killed run gets less than that. A crash or a power loss kills one,
   and so does a logout or a restart during a sync that needs longer
   than launchd's exit timeout: a stopping agent lets its sync run on
-  until launchd kills it. The run continuing it first waits about two
-  minutes for the dead run's lease to lapse
-  ([ADR 0032](0032-root-leases.md)). And what the killed run wrote after
+  until launchd kills it. The run continuing it first watches each
+  lease it needs that the dead run left, for two minutes and however
+  long ago that run died: a lease counts as dead only once its reader
+  has seen it unchanged that long ([ADR 0032](0032-root-leases.md)).
+  That is about two minutes for a Backup or a Mirror, which leases its
+  target, and about four for a two-way Sync, which leases both folders
+  one after the other. And what the killed run wrote after
   its last commit, up to a batch of 256 entries and the copies then in
   flight ([ADR 0020](0020-run-execution.md)), is in no journal: the
   continuing run finds those paths equal on both sides, and Undo leaves

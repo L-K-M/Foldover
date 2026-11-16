@@ -222,8 +222,9 @@ you might expect. Only the last three below block saving
   while it synced, the last items that sync wrote, up to about 256, were
   not recorded yet: Undo leaves them as they are, and what the sync
   replaced or removed there stays in its archive. The sync also
-  continues only about two minutes after the agent starts, once the
-  killed sync's lease on the folders has lapsed
+  continues only about two minutes after the agent starts, or about
+  four for a two-way Sync: for each folder it writes, it first watches
+  the lease the killed sync left there for two minutes
   ([ADR 0055](../adr/0055-interrupted-runs.md)).
 - Empty folders are not recreated by Undo
   ([ADR 0029](../adr/0029-undo.md)).

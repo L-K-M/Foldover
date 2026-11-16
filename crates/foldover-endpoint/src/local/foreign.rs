@@ -62,7 +62,8 @@ impl LocalEndpoint {
     /// such a copy stages nothing a later one could take up. The change
     /// time counts because a write that puts the modification time back
     /// shows in it alone, and a clock in coarse ticks gives a further such
-    /// write within the tick the same one.
+    /// write within the tick the same one. A change time that is no valid
+    /// time, or either time ahead of `now`, counts as recent.
     pub(crate) fn source_state(entry: &LocalEntry, now: SystemTime) -> Option<SourceState> {
         let settled =
             |time: SystemTime| now.duration_since(time).is_ok_and(|age| age >= RACY_WINDOW);
