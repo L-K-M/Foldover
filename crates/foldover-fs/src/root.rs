@@ -225,6 +225,20 @@ impl EntryMetadata {
         key
     }
 
+    /// The fields no write to a file's data leaves as they were: its size,
+    /// modification time, change time and inode. Unlike `stat_key` it
+    /// leaves out the device, which is numbered again whenever a volume is
+    /// mounted, so an untouched file keeps this key across a restart.
+    pub fn data_key(&self) -> Vec<u8> {
+        let mut key = Vec::new();
+        key.extend_from_slice(&self.size.to_le_bytes());
+        push_time(&mut key, Some(self.modified));
+        key.extend_from_slice(&self.changed.0.to_le_bytes());
+        key.extend_from_slice(&self.changed.1.to_le_bytes());
+        key.extend_from_slice(&self.identity.inode.to_le_bytes());
+        key
+    }
+
     /// Flags an owner sets on the entry itself; `None` when flags are unreported.
     pub fn user_flags(&self) -> Option<u32> {
         self.flags.map(user_flags)
@@ -1510,5 +1524,57 @@ mod tests {
         assert_eq!(second.size(), first.size());
         assert_eq!(second.modified(), first.modified());
         assert_ne!(second.stat_key(), first.stat_key());
+    }
+
+    /// A write that leaves size and modification time as they were still
+    /// moves the change time, and a file put in another's place has
+    /// another inode.
+    #[test]
+    fn data_keys_change_with_every_write_to_the_file() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("file");
+        fs::write(&file, b"abc").unwrap();
+        let root = Root::open(temporary.path()).unwrap();
+        let first = root.metadata(&path(b"file")).unwrap();
+        assert_eq!(
+            first.data_key(),
+            root.metadata(&path(b"file")).unwrap().data_key()
+        );
+
+        // A coarse clock gives two changes within a tick one change time,
+        // so the write repeats until the file system shows it.
+        let second = (0..250)
+            .find_map(|_| {
+                let mut written = fs::File::options().write(true).open(&file).unwrap();
+                written.seek(SeekFrom::Start(1)).unwrap();
+                written.write_all(b"x").unwrap();
+                written.set_modified(first.modified()).unwrap();
+                drop(written);
+                let second = root.metadata(&path(b"file")).unwrap();
+                if second.data_key() == first.data_key() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    return None;
+                }
+                Some(second)
+            })
+            .expect("the change time never moved");
+        assert_eq!(second.size(), first.size());
+        assert_eq!(second.modified(), first.modified());
+        assert_eq!(second.identity(), first.identity());
+
+        let other = temporary.path().join("other");
+        fs::write(&other, b"axc").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(first.modified())
+            .unwrap();
+        fs::rename(&other, &file).unwrap();
+        let third = root.metadata(&path(b"file")).unwrap();
+        assert_ne!(third.identity().inode(), second.identity().inode());
+        assert_ne!(third.data_key(), second.data_key());
     }
 }

@@ -3,7 +3,7 @@ pub(crate) mod archive;
 mod conflict;
 pub(crate) mod filter;
 mod foreign;
-pub(crate) use foreign::Carried;
+pub(crate) use foreign::{Carried, SourceState};
 mod fingerprint_key;
 mod identity;
 mod lock;

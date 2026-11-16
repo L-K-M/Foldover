@@ -133,9 +133,10 @@ changes, and compares everything hourly
 A large copy that breaks off resumes where it stopped when it lands in
 a local folder or on a paired Mac. A large copy from this Mac to an SFTP
 server resumes after the part the server confirmed, also after a
-restart; Foldover trusts the server's confirmations and does not read
-that part back. Copies from an SFTP server read each file once instead
-of twice ([ADR 0034](../adr/0034-resumed-transfers.md),
+restart, as long as the file on this Mac has not been written since;
+Foldover trusts the server's confirmations and does not read that part
+back. Copies from an SFTP server read each file once instead of twice
+([ADR 0034](../adr/0034-resumed-transfers.md),
 [ADR 0058](../adr/0058-sftp-resumed-uploads.md)).
 
 While you edit a pair, Foldover warns that an SFTP side cannot keep the

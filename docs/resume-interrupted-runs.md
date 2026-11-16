@@ -432,6 +432,9 @@ this is a policy change, not a refactor.
 No offset is persisted: every byte more than the write window before the
 kept file's end was acknowledged, so the resume point follows from the
 remote size. Copies from SFTP or paired-Mac sources still start over.
+Unlike the mechanism below, a partial is named for its content and the
+state of the file it was read from, so only that file, not written
+since, continues it.
 
 Killed staged copies go to the leftover pass on every endpoint kind, and
 SFTP destinations never keep partials.

@@ -2,15 +2,32 @@
 //! such as SFTP servers. Those carry data, mode and modification time
 //! only; the same verification and staging rules apply.
 
+use std::time::SystemTime;
+
 use foldover_fs::{
     Chunks, ForeignMetadata, HashError, NativeMetadata, Placement, Resume, WriteError,
 };
 use foldover_types::{Digest, EntryContent, EntryVersion, SyncPath};
 
 use super::{
-    ApplyError, Archiving, Expected, LocalEndpoint, LocalEntry, ObservedEntry, Payload, RunScope,
-    ScanControl, ScanError, entry_version, metadata_version, observed,
+    ApplyError, Archiving, Expected, LocalEndpoint, LocalEntry, ObservedEntry, Payload,
+    RACY_WINDOW, RunScope, ScanControl, ScanError, entry_version, metadata_version, observed,
 };
+
+/// The state a file here was in when a copy staged on a server began
+/// reading it (ADR 0058). The same state again means no write to the
+/// file since, so what that copy sent is what the file still holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SourceState([u8; SOURCE_STATE_BYTES]);
+
+/// Half a BLAKE3 digest names a state within one content's partials.
+const SOURCE_STATE_BYTES: usize = 16;
+
+impl SourceState {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 /// What a streamed copy carries besides data: mode and time, and the
 /// attributes another Mac sends; None from sources without any, such as
@@ -37,6 +54,22 @@ impl LocalEndpoint {
                 }
                 error => error,
             })
+    }
+
+    /// The state of a verified file, for staging its copy where nothing
+    /// hashes what was kept. `None` while the file was modified too
+    /// recently for its timestamps to show another write: such a copy
+    /// stages nothing a later one could take up.
+    pub(crate) fn source_state(entry: &LocalEntry, now: SystemTime) -> Option<SourceState> {
+        let settled = now
+            .duration_since(entry.metadata.modified())
+            .is_ok_and(|age| age >= RACY_WINDOW);
+        settled.then(|| {
+            let state = blake3::hash(&entry.metadata.data_key());
+            let mut bytes = [0; SOURCE_STATE_BYTES];
+            bytes.copy_from_slice(&state.as_bytes()[..SOURCE_STATE_BYTES]);
+            SourceState(bytes)
+        })
     }
 
     pub(crate) fn foreign_metadata(entry: &LocalEntry) -> ForeignMetadata {

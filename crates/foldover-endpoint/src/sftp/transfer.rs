@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::io;
+use std::time::SystemTime;
 
 use foldover_fs::{NativeMetadata, PARTIAL_MIN_BYTES, Resume};
 use foldover_net::sftp::{Attributes, FileKind, Session};
@@ -226,11 +227,16 @@ pub(crate) fn copy(
             // records is staged where a stopped copy can resume. Only a
             // local source returns the whole file's digest from a
             // resumed read; a server that keeps nothing starts over.
-            let partial = match (from, run.archiving(), expected) {
-                (Endpoint::Local(_), Archiving::Kept, EntryContent::File(content))
+            // Nothing hashes what the server kept, so the staged file
+            // belongs to this file in this state alone: one written
+            // since, a duplicate, or a file changed too recently to tell
+            // starts its own.
+            let partial = match (&source, run.archiving(), expected) {
+                (Source::Local(_, entry), Archiving::Kept, EntryContent::File(content))
                     if planned.size() >= PARTIAL_MIN_BYTES =>
                 {
-                    remote.claim_partial(content, planned.size())
+                    crate::LocalEndpoint::source_state(entry, SystemTime::now())
+                        .and_then(|state| remote.claim_partial(content, state, planned.size()))
                 }
                 _ => None,
             };
@@ -537,12 +543,14 @@ fn send_on(
                             Ok(())
                         },
                     );
-                    // The next copy of this content takes up what this one
-                    // staged without reading it (ADR 0058), so the file may
-                    // stay only while it is taken to hold that content:
-                    // when a person or the server stopped the copy. A
-                    // source that failed while it was read, changed for
-                    // one, may have sent other bytes.
+                    // A copy of this file in this state takes up what this
+                    // one staged without reading it (ADR 0058), so the
+                    // staged file stays when a person or the server
+                    // stopped the copy. A source that failed while it was
+                    // read, changed for one, may have sent other bytes
+                    // and is in another state now: nothing would ever
+                    // continue what was staged, so it goes at once rather
+                    // than with the archive's retention.
                     let source_failed = matches!(
                         *failure.borrow(),
                         Some(ref failure) if !matches!(failure, ApplyError::Scan(ScanError::Cancelled))

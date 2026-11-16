@@ -3126,7 +3126,15 @@ fn resumable_over(
     let remote = Endpoint::Sftp(remote);
     let local = Endpoint::Local(LocalEndpoint::open(local_directory.path()).unwrap());
     let content = resumable_content();
-    fs::write(local_directory.path().join("big"), &content).unwrap();
+    let big = local_directory.path().join("big");
+    fs::write(&big, &content).unwrap();
+    // A file changed moments ago stages nothing another copy continues.
+    fs::File::options()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
     let here = local
         .observe_from(
             PairOptions::default().metadata(),
@@ -3150,19 +3158,41 @@ fn resumable_over(
 }
 
 impl Resumable {
+    /// Where a copy of `big`, in the state it is in now, stages.
     fn partial(&self) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (Endpoint::Local(local), Endpoint::Sftp(remote)) = (&self.local, &self.remote) else {
+            unreachable!()
+        };
         let foldover_types::EntryContent::File(content) = self.entry.version().content() else {
             unreachable!()
         };
-        let name: String = content
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        self.remote_directory
-            .path()
-            .join(".foldover/partial")
-            .join(name)
+        let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+        let entry = local
+            .source_entry(&path(b"big"), &self.entry, &run, &mut proceed)
+            .unwrap();
+        let state = LocalEndpoint::source_state(&entry, SystemTime::now())
+            .expect("the fixture's file is settled");
+        let claimed = remote
+            .claim_partial(content, state, self.entry.size())
+            .unwrap();
+        PathBuf::from(OsStr::from_bytes(&claimed.remote))
+    }
+
+    /// `big` as the local folder holds it now.
+    fn observed(&self) -> ObservedEntry {
+        let here = self
+            .local
+            .observe_from(
+                PairOptions::default().metadata(),
+                &Filter::none(),
+                &BTreeMap::new(),
+                &mut proceed,
+                &mut |_| {},
+            )
+            .unwrap();
+        here.entries()[&path(b"big")].clone()
     }
 
     fn copy(&self, run: &RunScope) -> Result<EntryVersion, ApplyError> {
@@ -3276,12 +3306,10 @@ fn a_cancelled_copy_to_a_server_keeps_its_partial_for_the_next() {
     assert!(!partial.exists());
 }
 
-/// A server that goes away during a copy stopped it, and the source did
-/// not: the failure is the write's, and what the server kept stays for
-/// the next copy, which finishes it over a new session.
-#[test]
-fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
-    let Some(server) = server() else { return };
+/// `resumable` on a server whose newest session a test can take away:
+/// each writes its process id to the returned file.
+fn resumable_on_a_stoppable_server() -> Option<(Resumable, PathBuf)> {
+    let server = server()?;
     let remote_directory = tempfile::tempdir().unwrap();
     fs::create_dir(remote_directory.path().join(".foldover")).unwrap();
     let logs = tempfile::tempdir().unwrap();
@@ -3298,7 +3326,36 @@ fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
         remote_directory.path().as_os_str().as_encoded_bytes(),
     )
     .unwrap();
-    let pair = resumable_over(remote, remote_directory, logs);
+    Some((resumable_over(remote, remote_directory, logs), pid))
+}
+
+/// End the session that wrote its process id to `pid`, as a server
+/// going away does.
+fn stop_server(pid: &Path) {
+    let id = fs::read_to_string(pid).unwrap();
+    std::process::Command::new("kill")
+        .args(["-9", id.trim()])
+        .status()
+        .unwrap();
+}
+
+/// Write `bytes` over `file` from `offset`, in place.
+fn write_at(file: &Path, offset: usize, bytes: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut file = fs::File::options().write(true).open(file).unwrap();
+    file.seek(SeekFrom::Start(offset as u64)).unwrap();
+    file.write_all(bytes).unwrap();
+}
+
+/// A server that goes away during a copy stopped it, and the source did
+/// not: the failure is the write's, and what the server kept stays for
+/// the next copy, which finishes it over a new session.
+#[test]
+fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
+    let Some((pair, pid)) = resumable_on_a_stoppable_server() else {
+        return;
+    };
     let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
     let partial = pair.partial();
 
@@ -3312,11 +3369,7 @@ fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
         &mut || {
             let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
             if !killed && staged >= 4 * 1024 * 1024 {
-                let id = fs::read_to_string(&pid).unwrap();
-                std::process::Command::new("kill")
-                    .args(["-9", id.trim()])
-                    .status()
-                    .unwrap();
+                stop_server(&pid);
                 killed = true;
             }
             ScanControl::Continue
@@ -3347,8 +3400,6 @@ fn a_copy_the_server_broke_off_keeps_its_partial_and_fails_as_a_write() {
 /// in the folder would.
 #[test]
 fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
-    use std::io::{Seek, SeekFrom, Write};
-
     const MIB: usize = 1024 * 1024;
     // Well past what the copy has read once 4 MiB reached the server.
     const EDITED: std::ops::Range<usize> = 12 * MIB..13 * MIB;
@@ -3357,11 +3408,6 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
     let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
     let partial = pair.partial();
     let big = pair.local_directory.path().join("big");
-    let overwrite = |bytes: &[u8]| {
-        let mut file = fs::File::options().write(true).open(&big).unwrap();
-        file.seek(SeekFrom::Start(EDITED.start as u64)).unwrap();
-        file.write_all(bytes).unwrap();
-    };
     let mut changed = false;
     let stopped = pair.remote.copy_from(
         &pair.local,
@@ -3372,7 +3418,7 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
         &mut || {
             let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
             if !changed && staged >= 4 * MIB as u64 {
-                overwrite(&vec![0xa5; EDITED.len()]);
+                write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
                 changed = true;
             }
             ScanControl::Continue
@@ -3384,7 +3430,7 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
     );
     assert!(!partial.exists());
 
-    overwrite(&pair.content[EDITED]);
+    write_at(&big, EDITED.start, &pair.content[EDITED]);
     let here = pair
         .local
         .observe_from(
@@ -3411,6 +3457,124 @@ fn a_copy_whose_source_changed_keeps_no_partial_for_the_next() {
         fs::read(pair.remote_directory.path().join("big")).unwrap(),
         pair.content
     );
+}
+
+/// A copy that stops before its read ends, here because the server went
+/// away, never reaches the check that follows the read. Its source was
+/// written to meanwhile, so what it staged holds bytes of neither
+/// version. The file then holds the planned content again: its copy must
+/// not continue from what the stopped one staged.
+#[test]
+fn a_stopped_copy_is_not_continued_once_its_source_was_written() {
+    const MIB: usize = 1024 * 1024;
+    // Past what the copy has read once 4 MiB reached the server, and
+    // before what it has sent once 16 MiB did.
+    const EDITED: std::ops::Range<usize> = 12 * MIB..13 * MIB;
+
+    let Some((pair, pid)) = resumable_on_a_stoppable_server() else {
+        return;
+    };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    let partial = pair.partial();
+    let big = pair.local_directory.path().join("big");
+    let modified = fs::metadata(&big).unwrap().modified().unwrap();
+
+    let (mut changed, mut killed) = (false, false);
+    let stopped = pair.remote.copy_from(
+        &pair.local,
+        &path(b"big"),
+        &pair.entry,
+        Expected::Absent,
+        &run,
+        &mut || {
+            let staged = fs::metadata(&partial).map_or(0, |staged| staged.len());
+            if !changed && staged >= 4 * MIB as u64 {
+                write_at(&big, EDITED.start, &vec![0xa5; EDITED.len()]);
+                changed = true;
+            }
+            if !killed && staged >= 16 * MIB as u64 {
+                stop_server(&pid);
+                killed = true;
+            }
+            ScanControl::Continue
+        },
+    );
+    assert!(
+        matches!(stopped, Err(ApplyError::Write { .. })),
+        "{stopped:?}"
+    );
+    let staged = fs::read(&partial).unwrap();
+    assert!(staged.len() >= 16 * MIB, "{}", staged.len());
+    assert_eq!(
+        staged[EDITED],
+        vec![0xa5; EDITED.len()],
+        "the stopped copy sent what was written under it"
+    );
+
+    // The content, size, modification time and inode the stopped copy
+    // began with: only the change time tells that the file was written.
+    write_at(&big, EDITED.start, &pair.content[EDITED]);
+    fs::File::options()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let entry = pair.observed();
+    assert_eq!(entry.version(), pair.entry.version());
+    pair.remote
+        .copy_from(
+            &pair.local,
+            &path(b"big"),
+            &entry,
+            Expected::Absent,
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    let placed = fs::read(pair.remote_directory.path().join("big")).unwrap();
+    assert!(
+        placed == pair.content,
+        "the copy continued from what the stopped one staged"
+    );
+    assert!(
+        partial.exists(),
+        "the stopped copy's partial waits to be pruned"
+    );
+}
+
+/// A file modified within what its timestamps resolve could be written
+/// again unseen, so its copy stages beside the destination and leaves
+/// nothing for a later one to continue.
+#[test]
+fn a_file_modified_moments_ago_stages_beside_its_destination() {
+    let Some(pair) = resumable() else { return };
+    let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
+    fs::File::options()
+        .write(true)
+        .open(pair.local_directory.path().join("big"))
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    pair.remote
+        .copy_from(
+            &pair.local,
+            &path(b"big"),
+            &pair.observed(),
+            Expected::Absent,
+            &run,
+            &mut proceed,
+        )
+        .unwrap();
+    assert!(
+        !pair
+            .remote_directory
+            .path()
+            .join(".foldover/partial")
+            .exists()
+    );
+    let placed = fs::read(pair.remote_directory.path().join("big")).unwrap();
+    assert!(placed == pair.content);
 }
 
 /// Partials follow the archive's retention.
