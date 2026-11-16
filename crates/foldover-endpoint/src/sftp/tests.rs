@@ -3213,8 +3213,20 @@ impl Resumable {
         run: &RunScope,
         control: &mut impl FnMut() -> ScanControl,
     ) -> Result<EntryVersion, ApplyError> {
+        self.copy_at(self.later, entry, run, control)
+    }
+
+    /// Copy `big`, planned as `entry`, to the server as a copy that
+    /// begins at `began` does.
+    fn copy_at(
+        &self,
+        began: SystemTime,
+        entry: &ObservedEntry,
+        run: &RunScope,
+        control: &mut impl FnMut() -> ScanControl,
+    ) -> Result<EntryVersion, ApplyError> {
         transfer::copy_at(
-            self.later,
+            began,
             &self.remote,
             &self.local,
             &path(b"big"),
@@ -3546,22 +3558,26 @@ fn a_file_modified_moments_ago_stages_beside_its_destination() {
 /// A write that puts the modification time back shows in the change time
 /// alone, and a clock in coarse ticks gives another such write within the
 /// tick the same one. So a file changed moments ago stages beside its
-/// destination too, however old its modification time: the fixture wrote
-/// the file and set that back a minute just now.
+/// destination too, however old its modification time: here a copy
+/// begins a second after the fixture wrote the file and set that back a
+/// minute.
 #[test]
 fn a_file_changed_moments_ago_stages_beside_its_destination() {
+    use std::os::unix::fs::MetadataExt;
+
     let Some(pair) = resumable() else { return };
     let run = RunScope::new(UNIX_EPOCH, crate::test_pair(), PairOptions::default());
-    pair.remote
-        .copy_from(
-            &pair.local,
-            &path(b"big"),
-            &pair.entry,
-            Expected::Absent,
-            &run,
-            &mut proceed,
-        )
-        .unwrap();
+    let stat = fs::metadata(pair.local_directory.path().join("big")).unwrap();
+    let changed = UNIX_EPOCH + Duration::new(stat.ctime() as u64, stat.ctime_nsec() as u32);
+    let modified = stat.modified().unwrap();
+    assert!(changed > modified + Duration::from_secs(30));
+    pair.copy_at(
+        changed + Duration::from_secs(1),
+        &pair.entry,
+        &run,
+        &mut proceed,
+    )
+    .unwrap();
     assert!(
         !pair
             .remote_directory
