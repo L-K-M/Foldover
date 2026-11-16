@@ -22,9 +22,11 @@ cannot prove the placed file.
   `update_metadata_written` return a `Written`: the stored version and,
   where the endpoint can prove it, the entry as an observation after
   placement would record it. `copy_from` and `update_metadata_from`
-  keep returning only the version. Local and SFTP folders report one;
-  another Mac's folder reports none, since the serving Mac keeps its
-  own observation of it.
+  keep returning only the version. A local folder reports one for what
+  another local folder sends it, and an SFTP folder for every file it
+  receives. A local folder receiving from a server or another Mac
+  reports none yet. Another Mac's folder reports none, since the
+  serving Mac keeps its own observation of it.
 - **Local: a stat after placement.** After the rename, and after the
   previous content is set aside, the endpoint stats the placed path the
   same way a scan does. It reports the observation only if the file
@@ -44,6 +46,13 @@ cannot prove the placed file.
   revision stores neither. The rows replace the stored ones for those
   paths; the observation stored before the run has already been
   written by then, so it cannot overwrite them.
+- **Or nothing stays stored.** The observation stored before the run
+  describes what a write replaced. A write that reports no observation,
+  or one the engine does not keep, drops the stored row for its path in
+  that same transaction, and so do an archive and a move for the paths
+  they empty and fill. A stored observation never outlives a write to
+  its path: on an SFTP folder, a file placed with its predecessor's
+  size and time would pass for it (ADR 0057).
 - **Settling is unchanged.** A fingerprint taken within the 3 s racy
   window of the file's modification time is never trusted, and the
   weekly reread still applies, so a copy of a freshly edited file is

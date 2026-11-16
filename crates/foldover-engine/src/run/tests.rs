@@ -4040,6 +4040,151 @@ fn undo_forgets_the_observations_of_what_it_writes() {
     );
 }
 
+/// What a run's commits did to the stored observations: the paths whose
+/// rows they replaced, and those whose rows they dropped, each in order.
+struct Observations {
+    report: RunReport,
+    stored: Vec<(Side, SyncPath)>,
+    forgotten: Vec<(Side, SyncPath)>,
+}
+
+fn observations(prepared: PairRun, pair: &mut Fixture, context: RunContext) -> Observations {
+    let mut store = pair.store();
+    let (mut stored, mut forgotten) = (Vec::new(), Vec::new());
+    let outcome = prepared
+        .execute(
+            Approval::new(0, 1),
+            context,
+            at(1),
+            &mut |planned, commit| {
+                if let Commit::Base {
+                    observed,
+                    forgotten: paths,
+                    ..
+                } = &commit
+                {
+                    stored.extend(
+                        observed
+                            .iter()
+                            .map(|(side, entry)| (*side, entry.path.clone())),
+                    );
+                    forgotten.extend_from_slice(paths);
+                }
+                store.apply(planned, commit)
+            },
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap();
+    let RunOutcome::Ran(report) = outcome else {
+        panic!("expected a run");
+    };
+    let in_order = |a: &(Side, SyncPath), b: &(Side, SyncPath)| {
+        (a.0 as usize, &a.1).cmp(&(b.0 as usize, &b.1))
+    };
+    stored.sort_by(in_order);
+    forgotten.sort_by(in_order);
+    Observations {
+        report,
+        stored,
+        forgotten,
+    }
+}
+
+/// ADR 0056: a write stores what it left, or the next run reads the entry.
+/// The observation stored before the run describes what the write
+/// replaced, and on an SFTP folder a replacement with its size and time
+/// would pass for it (ADR 0057), so a write that reports nothing drops
+/// it. Memory folders report nothing.
+#[test]
+fn a_write_that_reports_no_observation_forgets_the_stored_one() {
+    let mut pair = fixture(SyncMode::Sync);
+    let folders = [
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+        foldover_sim::MemoryEndpoint::new(foldover_sim::Quirks::default()),
+    ];
+    pair.memory = Some(folders.clone());
+    let [left, right] = &folders;
+    left.put_file(b"new.txt", b"n").unwrap();
+    right.put_file(b"edit.txt", b"v1").unwrap();
+
+    let run = observations(pair.prepare(), &mut pair, RunContext::Reviewed);
+    assert_eq!(run.report.copied(), 2, "{:?}", run.report.failures());
+    assert!(run.stored.is_empty());
+    assert_eq!(
+        run.forgotten,
+        [
+            (Side::Left, path(b"edit.txt")),
+            (Side::Right, path(b"new.txt")),
+        ]
+    );
+}
+
+/// A copy into a local folder stores what it left. An archive and a move
+/// empty their old paths, and a move reports nothing for its new one:
+/// those stored observations go with the batch.
+#[test]
+fn archives_and_moves_forget_the_paths_they_change() {
+    let mut pair = fixture(SyncMode::Sync);
+    let left = pair.left.path().to_owned();
+    fs::write(left.join("gone.txt"), b"g").unwrap();
+    fs::write(left.join("old.txt"), b"moved").unwrap();
+    pair.sync();
+    fs::remove_file(left.join("gone.txt")).unwrap();
+    fs::rename(left.join("old.txt"), left.join("new.txt")).unwrap();
+    fs::write(left.join("made.txt"), b"m").unwrap();
+
+    let run = observations(pair.prepare(), &mut pair, RunContext::Interactive);
+    assert!(
+        run.report.failures().is_empty(),
+        "{:?}",
+        run.report.failures()
+    );
+    assert_eq!(
+        (
+            run.report.copied(),
+            run.report.archived(),
+            run.report.moved()
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(run.stored, [(Side::Right, path(b"made.txt"))]);
+    assert_eq!(
+        run.forgotten,
+        [
+            (Side::Right, path(b"gone.txt")),
+            (Side::Right, path(b"new.txt")),
+            (Side::Right, path(b"old.txt")),
+        ]
+    );
+}
+
+/// ADR 0057: a copy that fails on what its source held contradicts the
+/// source's stored observation as well. Where a pair trusts remote stats
+/// in every folder that may be a reused version, and the copy would fail
+/// the same way every run until the file's weekly reread.
+#[test]
+fn a_copy_that_finds_its_source_changed_forgets_both_sides() {
+    let mut pair = fixture(SyncMode::Sync);
+    let left = pair.left.path().to_owned();
+    fs::write(left.join("a.txt"), b"planned").unwrap();
+    let prepared = pair.prepare();
+    fs::write(left.join("a.txt"), b"changed since").unwrap();
+
+    let run = observations(prepared, &mut pair, RunContext::Reviewed);
+    assert_eq!(
+        run.report.failures().len(),
+        1,
+        "{:?}",
+        run.report.failures()
+    );
+    assert!(run.stored.is_empty());
+    assert_eq!(
+        run.forgotten,
+        [(Side::Left, path(b"a.txt")), (Side::Right, path(b"a.txt"))]
+    );
+}
+
 /// ADR 0055: a run continuing an interrupted one keeps its journal, and
 /// Undo reverts both, newest first, each from its own archive folder.
 #[test]
