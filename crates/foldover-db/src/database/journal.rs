@@ -2,7 +2,10 @@
 //! undone. A run's first recorded batch replaces the previous run's
 //! entries, unless it continues an interrupted run (ADR 0055): then the
 //! journal holds that chain of runs, and undoing spends them all. Entries
-//! change only together with the base, in one transaction.
+//! change only together with the base, in one transaction, and each run
+//! keeps the identities of the folders it wrote beside them.
+
+use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -26,14 +29,26 @@ pub struct JournalRow {
     pub source: Option<Vec<u8>>,
 }
 
+/// One journaled run: its entries in write order, and the identities of
+/// the folders it wrote, left then right, which a run an older agent
+/// journaled lacks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JournalRun {
+    pub run: String,
+    pub identities: Option<[Vec<u8>; 2]>,
+    pub rows: Vec<JournalRow>,
+}
+
 /// How a base change touches the journal.
 #[derive(Clone, Copy, Debug)]
 pub enum JournalChange<'a> {
     None,
-    /// Writes of `run`, recorded with the base updates they caused.
+    /// Writes of `run`, recorded with the base updates they caused, in
+    /// the folders with these identities, left then right.
     Record {
         run: &'a str,
         rows: &'a [JournalRow],
+        identities: [&'a [u8]; 2],
     },
     /// Hold the pair's automatic syncs (`automation_hold`).
     Hold,
@@ -56,6 +71,13 @@ const REPLACE_OTHER_RUNS: [&str; 2] = [
     "DELETE FROM run_journal WHERE pair_id=?1 AND run<?2",
     "DELETE FROM run_journal WHERE pair_id=?1 AND run>?2",
 ];
+/// The identities of the runs those statements drop: a row per run.
+const FORGET_OTHER_RUNS: &str = "DELETE FROM journal_identity WHERE pair_id=?1 AND run!=?2";
+/// The identities of the folders a run wrote; each of its batches names
+/// the same ones.
+const RECORD_IDENTITIES: &str =
+    "INSERT INTO journal_identity (pair_id,run,left_identity,right_identity)
+     VALUES (?1,?2,?3,?4) ON CONFLICT (pair_id,run) DO NOTHING";
 
 /// Whether the pair's running run continues the journal (`interrupted_run`).
 const CONTINUES: &str =
@@ -89,12 +111,20 @@ pub(super) fn apply(
         JournalChange::Spend => {
             transaction.execute("DELETE FROM run_journal WHERE pair_id=?1", params![pair])?;
             transaction.execute(
+                "DELETE FROM journal_identity WHERE pair_id=?1",
+                params![pair],
+            )?;
+            transaction.execute(
                 "DELETE FROM interrupted_run WHERE pair_id=?1",
                 params![pair],
             )?;
             Ok(())
         }
-        JournalChange::Record { run, rows } => {
+        JournalChange::Record {
+            run,
+            rows,
+            identities: [left, right],
+        } => {
             if rows.is_empty() {
                 return Ok(());
             }
@@ -108,7 +138,9 @@ pub(super) fn apply(
                 for sql in REPLACE_OTHER_RUNS {
                     transaction.execute(sql, params![pair, run])?;
                 }
+                transaction.execute(FORGET_OTHER_RUNS, params![pair, run])?;
             }
+            transaction.execute(RECORD_IDENTITIES, params![pair, run, left, right])?;
             transaction.execute(WROTE, params![pair])?;
             let mut insert = transaction.prepare(
                 "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version,base_left,base_right,source)
@@ -138,12 +170,19 @@ impl Database {
     /// The pair's journaled runs, oldest first, each with its entries in
     /// write order. Run names begin with their start time, so name order
     /// is start order.
-    pub fn journal(&self, pair: &[u8]) -> Result<Vec<(String, Vec<JournalRow>)>, Error> {
+    pub fn journal(&self, pair: &[u8]) -> Result<Vec<JournalRun>, Error> {
+        let mut identities: BTreeMap<String, [Vec<u8>; 2]> = self
+            .connection
+            .prepare(
+                "SELECT run,left_identity,right_identity FROM journal_identity WHERE pair_id=?1",
+            )?
+            .query_map([pair], |row| Ok((row.get(0)?, [row.get(1)?, row.get(2)?])))?
+            .collect::<Result<_, _>>()?;
         let mut statement = self.connection.prepare(
             "SELECT run,seq,path,side,action,version,base_left,base_right,source FROM run_journal
              WHERE pair_id=?1 ORDER BY run,seq",
         )?;
-        let mut runs: Vec<(String, Vec<JournalRow>)> = Vec::new();
+        let mut runs: Vec<JournalRun> = Vec::new();
         let mut rows = statement.query([pair])?;
         while let Some(row) = rows.next()? {
             let run: String = row.get(0)?;
@@ -161,8 +200,12 @@ impl Database {
                 source: row.get(8)?,
             };
             match runs.last_mut() {
-                Some((last, entries)) if *last == run => entries.push(entry),
-                _ => runs.push((run, vec![entry])),
+                Some(last) if last.run == run => last.rows.push(entry),
+                _ => runs.push(JournalRun {
+                    identities: identities.remove(&run),
+                    run,
+                    rows: vec![entry],
+                }),
             }
         }
         Ok(runs)
@@ -171,7 +214,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{location, values};
+    use super::super::tests::{FOLDERS, location, remove_and_purge, values};
     use super::*;
     use crate::BaseChange;
 
@@ -180,7 +223,10 @@ mod tests {
         database: &Database,
         pair: &[u8],
     ) -> Result<Option<(String, Vec<JournalRow>)>, Error> {
-        Ok(database.journal(pair)?.pop())
+        Ok(database
+            .journal(pair)?
+            .pop()
+            .map(|newest| (newest.run, newest.rows)))
     }
 
     fn row(seq: i64, path: &[u8], action: &str) -> JournalRow {
@@ -255,7 +301,16 @@ mod tests {
         let pair = database.create_pair(&values()).unwrap();
         let other = database.create_pair(&values()).unwrap();
         let record = |database: &mut Database, pair: &[u8], run: &str, rows: &[JournalRow]| {
-            database.change_base(pair, 1, &[], JournalChange::Record { run, rows })
+            database.change_base(
+                pair,
+                1,
+                &[],
+                JournalChange::Record {
+                    run,
+                    rows,
+                    identities: FOLDERS,
+                },
+            )
         };
         let first = [row(0, b"a", "create"), row(1, b"b", "create")];
         let second = [row(2, b"c", "replace")];
@@ -322,7 +377,11 @@ mod tests {
                 &pair.id,
                 1,
                 &[],
-                JournalChange::Record { run, rows: &first },
+                JournalChange::Record {
+                    run,
+                    rows: &first,
+                    identities: FOLDERS,
+                },
             )
             .unwrap();
 
@@ -343,6 +402,7 @@ mod tests {
                     JournalChange::Record {
                         run,
                         rows: std::slice::from_ref(&invalid),
+                        identities: FOLDERS,
                     },
                 )
                 .is_err()
@@ -364,6 +424,7 @@ mod tests {
                     JournalChange::Record {
                         run,
                         rows: std::slice::from_ref(&row(2, b"n", "create")),
+                        identities: FOLDERS,
                     },
                 )
                 .is_err()
@@ -385,6 +446,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-20T10-00-00.000Z",
                     rows,
+                    identities: FOLDERS,
                 },
             )
         };
@@ -419,6 +481,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-19T10-00-00.000Z",
                     rows: &first,
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -431,6 +494,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-19T10-00-00.000Z",
                     rows: &more,
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -462,6 +526,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-19T10-00-00.000Z",
                     rows: &first[1..],
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -476,6 +541,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-19T11-00-00.000Z",
                     rows: &[],
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -489,6 +555,7 @@ mod tests {
                 JournalChange::Record {
                     run: "2026-10-19T12-00-00.000Z",
                     rows: &later,
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -519,10 +586,98 @@ mod tests {
                     &[],
                     JournalChange::Record {
                         run: "r",
-                        rows: &[invalid]
+                        rows: &[invalid],
+                        identities: FOLDERS
                     }
                 )
                 .is_err()
         );
+    }
+
+    /// Each run keeps the identities of the folders it wrote, from its
+    /// first batch, while its entries stay: a run replacing them, a spent
+    /// journal and changed roots take them too. A run an older agent
+    /// journaled has none.
+    #[test]
+    fn each_run_keeps_the_identities_of_the_folders_it_wrote() {
+        let (_directory, location) = location();
+        let mut database = Database::open(&location).unwrap();
+        let pair = database.create_pair(&values()).unwrap();
+        let elsewhere: [&[u8]; 2] = [&[3; 16], &[4; 16]];
+        let record = |database: &mut Database, run: &str, seq, identities| {
+            database.change_base(
+                &pair.id,
+                1,
+                &[],
+                JournalChange::Record {
+                    run,
+                    rows: &[row(seq, b"a", "create")],
+                    identities,
+                },
+            )
+        };
+        let journaled = |database: &Database| -> Vec<(String, Option<[Vec<u8>; 2]>)> {
+            let runs = database.journal(&pair.id).unwrap();
+            runs.into_iter()
+                .map(|run| (run.run, run.identities))
+                .collect()
+        };
+        let kept = |database: &Database| -> i64 {
+            database
+                .connection
+                .query_row("SELECT count(*) FROM journal_identity", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        let wrote = |identities: [&[u8]; 2]| Some(identities.map(<[u8]>::to_vec));
+
+        record(&mut database, "r1", 0, FOLDERS).unwrap();
+        record(&mut database, "r1", 1, elsewhere).unwrap();
+        assert_eq!(journaled(&database), [("r1".into(), wrote(FOLDERS))]);
+        // Identities that are not identities are refused with the batch.
+        assert!(record(&mut database, "r1", 2, [&[1; 15], &[2; 16]]).is_err());
+        assert_eq!(newest(&database, &pair.id).unwrap().unwrap().1.len(), 2);
+
+        record(&mut database, "r2", 0, elsewhere).unwrap();
+        assert_eq!(journaled(&database), [("r2".into(), wrote(elsewhere))]);
+        assert_eq!(kept(&database), 1);
+        database
+            .change_base(&pair.id, 1, &[], JournalChange::Spend)
+            .unwrap();
+        assert_eq!(kept(&database), 0);
+
+        database
+            .connection
+            .execute(
+                "INSERT INTO run_journal (pair_id,run,seq,path,side,action,version) VALUES (?1,'r3',0,x'61','right','create',x'00')",
+                [&pair.id],
+            )
+            .unwrap();
+        assert_eq!(journaled(&database), [("r3".into(), None)]);
+
+        record(&mut database, "r4", 0, FOLDERS).unwrap();
+        let mut moved = values();
+        moved.right_root = b"/elsewhere".to_vec();
+        let moved = database.update_pair(&pair.id, 1, &moved).unwrap();
+        assert!(journaled(&database).is_empty());
+        assert_eq!(kept(&database), 0);
+
+        // Removing the pair takes them with it.
+        database
+            .change_base(
+                &pair.id,
+                moved.revision,
+                &[],
+                JournalChange::Record {
+                    run: "r5",
+                    rows: &[row(0, b"a", "create")],
+                    identities: FOLDERS,
+                },
+            )
+            .unwrap();
+        assert_eq!(kept(&database), 1);
+        remove_and_purge(&mut database, &pair.id, moved.revision);
+        assert_eq!(kept(&database), 0);
     }
 }

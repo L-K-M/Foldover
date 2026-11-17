@@ -516,6 +516,7 @@ impl Engine {
             }
             Commit::Base {
                 run,
+                identities,
                 updates,
                 journal,
                 observed,
@@ -527,6 +528,7 @@ impl Engine {
                 JournalUpdate::Record {
                     run,
                     entries: journal,
+                    identities,
                 },
                 observed,
                 forgotten,

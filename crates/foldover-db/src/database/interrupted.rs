@@ -179,7 +179,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{location, remove_and_purge, values};
+    use super::super::tests::{FOLDERS, location, remove_and_purge, values};
     use super::*;
     use crate::{JournalChange, JournalRow};
 
@@ -209,7 +209,16 @@ mod tests {
     fn record(database: &mut Database, pair: &[u8], run: &str) {
         let rows = [journal_row(0)];
         database
-            .change_base(pair, 1, &[], JournalChange::Record { run, rows: &rows })
+            .change_base(
+                pair,
+                1,
+                &[],
+                JournalChange::Record {
+                    run,
+                    rows: &rows,
+                    identities: FOLDERS,
+                },
+            )
             .unwrap();
     }
 
@@ -218,7 +227,7 @@ mod tests {
             .journal(pair)
             .unwrap()
             .into_iter()
-            .map(|(run, _)| run)
+            .map(|run| run.run)
             .collect()
     }
 

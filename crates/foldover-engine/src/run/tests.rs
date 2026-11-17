@@ -257,6 +257,12 @@ fn sftp_server() -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
+/// The identities of the folders a test's hand-made commits wrote.
+const FOLDERS: [EndpointId; 2] = [
+    EndpointId::from_bytes([1; 16]),
+    EndpointId::from_bytes([2; 16]),
+];
+
 /// The pair the fixture's runs belong to.
 fn fixture_pair() -> PairId {
     PairId::from_bytes([1; 16]).unwrap()
@@ -309,6 +315,7 @@ impl Store<'_> {
             }
             Commit::Base {
                 run,
+                identities,
                 updates,
                 journal,
                 ..
@@ -330,6 +337,7 @@ impl Store<'_> {
                             runs: vec![foldover_state::RunJournal {
                                 run: run.to_owned(),
                                 entries: journal.to_vec(),
+                                identities: Some(identities),
                             }],
                         })
                     }
@@ -1577,6 +1585,7 @@ fn captured_run_inputs_decode_like_the_wrapper() {
             pair.revision(),
             Commit::Base {
                 run: "run",
+                identities: FOLDERS,
                 updates: &[BaseUpdate::Record(
                     base_path.clone(),
                     BaselineEntry::new(version, version).unwrap(),
@@ -1666,6 +1675,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
             pair.revision(),
             Commit::Base {
                 run: "run",
+                identities: FOLDERS,
                 updates: &[BaseUpdate::Record(
                     base_path.clone(),
                     BaselineEntry::new(version, version).unwrap(),
@@ -1706,6 +1716,7 @@ fn captured_inputs_stay_at_their_revision_when_the_config_moves() {
             pair.revision(),
             Commit::Base {
                 run: "run",
+                identities: FOLDERS,
                 updates: &[],
                 journal: &[],
                 observed: &[],
@@ -1742,6 +1753,7 @@ fn captured_inputs_survive_pair_removal() {
             pair.revision(),
             Commit::Base {
                 run: "run",
+                identities: FOLDERS,
                 updates: &[BaseUpdate::Record(
                     base_path.clone(),
                     BaselineEntry::new(version, version).unwrap(),
@@ -4222,6 +4234,153 @@ fn undo_reverts_an_interrupted_run_and_the_run_that_continued_it() {
     assert!(!right.join("new.txt").exists());
     assert_eq!(pair.base, before);
     assert!(pair.journal.is_none());
+}
+
+/// Review: a first sync records the pair's identities only when it
+/// finishes, so Undo refused one a person stopped, as a sync that
+/// "changed nothing", although its journal held every file it copied.
+/// It now reverts it, in the folders that run wrote and no other.
+#[test]
+fn undo_reverts_a_first_sync_that_stopped_before_it_finished() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left");
+    let right = directory.path().join("right");
+    fs::create_dir(&left).unwrap();
+    fs::create_dir(&right).unwrap();
+    // More than a batch, so the stop comes after a commit.
+    let count = 2 * COMMIT_BATCH;
+    for index in 0..count {
+        fs::write(left.join(format!("file-{index}")), b"content").unwrap();
+    }
+    let location = foldover_state::StateLocation::Directory(directory.path().join("state"));
+    let mut engine = crate::Engine::open(&location).unwrap();
+    let draft = PairDraft::new(
+        "Stopped".into(),
+        root(&left),
+        root(&right),
+        SyncMode::Backup { source: Side::Left },
+    )
+    .unwrap();
+    let pair = engine.create_pair(&draft).unwrap();
+    let prepare = |engine: &crate::Engine| {
+        PairRun::prepare(
+            engine.run_inputs(pair.id()).unwrap(),
+            &mut proceed,
+            &NoProgress,
+        )
+        .unwrap()
+    };
+
+    // The person stops the first sync once its first batch is stored.
+    let committed = Cell::new(false);
+    let RunOutcome::Ran(report) = prepare(&engine)
+        .execute(
+            Approval::default(),
+            RunContext::Reviewed,
+            STARTED,
+            &mut |revision, commit| {
+                let batch = matches!(commit, Commit::Base { journal, .. } if !journal.is_empty());
+                engine.commit_run(pair.id(), revision, commit)?;
+                committed.set(committed.get() || batch);
+                Ok(())
+            },
+            &mut || match committed.get() {
+                true => ScanControl::Cancel,
+                false => ScanControl::Continue,
+            },
+            &NoProgress,
+        )
+        .unwrap()
+    else {
+        panic!("a reviewed first sync runs")
+    };
+    assert_eq!(report.completion(), Completion::Cancelled);
+    let copied = report.copied();
+    assert!(copied > 0 && copied < count as u64, "{copied}");
+    assert!(!engine.first_synced(pair.id()).unwrap());
+    let user_files = || {
+        fs::read_dir(&right)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name() != ".foldover")
+            .count() as u64
+    };
+    assert_eq!(user_files(), copied);
+
+    let undo = |engine: &mut crate::Engine, started| {
+        let journal = engine.journal(pair.id()).unwrap().expect("a journal");
+        prepare(engine).undo(
+            journal,
+            started,
+            &mut |revision, commit| engine.commit_run(pair.id(), revision, commit),
+            &mut proceed,
+        )
+    };
+
+    // Another folder at the same path is not the one the run wrote.
+    let identity = right.join(".foldover/id");
+    let wrote = fs::read(&identity).unwrap();
+    let other = EndpointId::from_bytes([9; 16]);
+    fs::write(&identity, format!("{other}\n")).unwrap();
+    let refused = undo(&mut engine, at(1));
+    assert!(
+        matches!(
+            refused,
+            Err(RunError::IdentityChanged { side: Side::Right })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(user_files(), copied);
+
+    fs::write(&identity, wrote).unwrap();
+    let undone = undo(&mut engine, at(2)).unwrap();
+    assert_eq!(undone.completion(), Completion::Finished);
+    assert!(undone.not_undone().is_empty(), "{:?}", undone.not_undone());
+    assert_eq!(undone.removed(), copied);
+    assert_eq!(user_files(), 0);
+    assert!(engine.journal(pair.id()).unwrap().is_none());
+    assert!(engine.run_inputs(pair.id()).unwrap().base.is_empty());
+    // Still a first sync: the next one is reviewed again.
+    assert!(!engine.first_synced(pair.id()).unwrap());
+}
+
+/// A run an older agent journaled kept no identities: Undo checks its
+/// folders against the pair's, as before, and refuses it while the pair
+/// has none rather than take whatever folders are there.
+#[test]
+fn undo_checks_a_run_journaled_without_identities_against_the_pairs() {
+    let mut pair = fixture(SyncMode::Sync);
+    let (left, right) = (pair.left.path().to_owned(), pair.right.path().to_owned());
+    fs::write(left.join("keep.txt"), b"k").unwrap();
+    pair.sync();
+    fs::write(left.join("new.txt"), b"n").unwrap();
+    pair.ran(Approval::default(), at(1));
+    for run in &mut pair.journal.as_mut().expect("a journaled run").runs {
+        run.identities = None;
+    }
+
+    let recorded = pair.identities;
+    pair.identities = RecordedIdentities::default();
+    let journal = pair.journal.clone().unwrap();
+    let prepared = pair.prepare();
+    let mut store = pair.store();
+    let refused = prepared.undo(
+        journal,
+        at(2),
+        &mut |planned, commit| store.apply(planned, commit),
+        &mut proceed,
+    );
+    assert!(
+        matches!(refused, Err(RunError::UndoUnconfirmed)),
+        "{refused:?}"
+    );
+    assert!(right.join("new.txt").exists());
+
+    pair.identities = recorded;
+    let undone = pair.undo_at(at(3));
+    assert!(undone.not_undone().is_empty(), "{:?}", undone.not_undone());
+    assert_eq!(undone.removed(), 1);
+    assert!(!right.join("new.txt").exists());
+    assert!(right.join("keep.txt").exists());
 }
 
 #[test]

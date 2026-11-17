@@ -236,20 +236,10 @@ impl RecordedIdentities {
 
 impl PairStore {
     pub fn identities(&self, id: PairId) -> Result<RecordedIdentities, Error> {
-        let decode = |bytes: Option<Vec<u8>>| {
-            bytes
-                .map(|bytes| {
-                    bytes
-                        .try_into()
-                        .map(EndpointId::from_bytes)
-                        .map_err(|_| Error::InvalidStored("endpoint identity"))
-                })
-                .transpose()
-        };
         let row = self.database.identities(id.as_bytes())?;
         Ok(RecordedIdentities::new(
-            decode(row.left)?,
-            decode(row.right)?,
+            row.left.map(identity).transpose()?,
+            row.right.map(identity).transpose()?,
         ))
     }
 
@@ -269,6 +259,14 @@ impl PairStore {
             right.as_bytes(),
         )?)
     }
+}
+
+/// A stored endpoint identity.
+fn identity(bytes: Vec<u8>) -> Result<EndpointId, Error> {
+    bytes
+        .try_into()
+        .map(EndpointId::from_bytes)
+        .map_err(|_| Error::InvalidStored("endpoint identity"))
 }
 
 const KEEP_LEFT: &str = "left";
@@ -909,6 +907,12 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
+    /// The identities of the folders the tests' journaled runs wrote.
+    const FOLDERS: [EndpointId; 2] = [
+        EndpointId::from_bytes([1; 16]),
+        EndpointId::from_bytes([2; 16]),
+    ];
+
     pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
@@ -1227,6 +1231,7 @@ mod tests {
             JournalUpdate::Record {
                 run: "2026-10-19T10-00-00.000Z",
                 entries: &[unsourced],
+                identities: FOLDERS,
             },
         );
         assert!(recorded.is_err());
@@ -1291,6 +1296,7 @@ mod tests {
                 JournalUpdate::Record {
                     run: "2026-10-19T10-00-00.000Z",
                     entries: &entries,
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -1300,6 +1306,7 @@ mod tests {
                 runs: vec![RunJournal {
                     run: "2026-10-19T10-00-00.000Z".into(),
                     entries: entries.to_vec(),
+                    identities: Some(FOLDERS),
                 }],
             })
         );
@@ -1326,6 +1333,7 @@ mod tests {
                 JournalUpdate::Record {
                     run: "2026-10-19T11-00-00.000Z",
                     entries: &entries[..1],
+                    identities: FOLDERS,
                 },
             )
             .unwrap();
@@ -1371,6 +1379,7 @@ mod tests {
                         JournalUpdate::Record {
                             run: "2026-10-20T10-00-00.000Z",
                             entries: &journal[start..start + batch.len()],
+                            identities: FOLDERS,
                         },
                     )
                     .unwrap();

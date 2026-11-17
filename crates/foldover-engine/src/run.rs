@@ -159,6 +159,11 @@ pub enum RunError {
     #[error("This pair has no sync to undo: its newest sync changed nothing or was undone")]
     NothingToUndo,
     #[error(
+        "This pair's newest sync cannot be undone: an earlier version of Foldover ran it without \
+         recording which folders it wrote, so Undo cannot confirm them"
+    )]
+    UndoUnconfirmed,
+    #[error(
         "The {side:?} folder keeps no archive, so this pair's syncs cannot be undone; files \
          replaced there are gone"
     )]
@@ -191,6 +196,11 @@ pub enum Commit<'a> {
     /// them (ADR 0029), so the run can be undone.
     Base {
         run: &'a str,
+        /// The identities of the folders the run writes, left then right,
+        /// kept with its entries: Undo writes only folders that still hold
+        /// them, which for a first sync that stopped are recorded nowhere
+        /// else.
+        identities: [EndpointId; 2],
         updates: &'a [BaseUpdate],
         journal: &'a [JournalEntry],
         /// Entries as the writes behind `updates` left them, stored with
@@ -1388,6 +1398,7 @@ impl PairRun {
         let mut commit_batch = |executor: &mut Executor<'_>| {
             let updates = Commit::Base {
                 run: &name,
+                identities,
                 updates: &executor.pending,
                 journal: &executor.journal,
                 observed: &executor.observed,
