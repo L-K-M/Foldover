@@ -30,7 +30,7 @@ pub use cursor::WatchCursorRow;
 pub use device::DeviceRow;
 pub use history::HistoryRow;
 pub use interrupted::{InterruptedRow, RunEnd};
-pub use journal::{JournalChange, JournalRow};
+pub use journal::{JournalChange, JournalRow, JournalRun};
 use migration_backup::create as backup;
 pub use mounts::MountRow;
 pub use pause::PauseRow;
@@ -70,12 +70,12 @@ const SNAPSHOT_PAGE: usize = 256;
 const PAIR_COLUMNS: &str = "id, revision, name, left_root, right_root, mode, modification_times, extended_attributes, permissions, durability, schedule, schedule_minutes, filters, size_limit, age_limit, canary, schedule_time, schedule_days, records, bandwidth_limit, review_policy, removal_protection, remote_stats";
 // Step N upgrades schema N-1 to N. Steps are append-only: never edit one
 // that has shipped, because existing databases already ran it.
-const MIGRATIONS: [&str; 33] = [
+const MIGRATIONS: [&str; 34] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
     SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12, SCHEMA_V13, SCHEMA_V14, SCHEMA_V15, SCHEMA_V16,
     SCHEMA_V17, SCHEMA_V18, SCHEMA_V19, SCHEMA_V20, SCHEMA_V21, SCHEMA_V22, SCHEMA_V23, SCHEMA_V24,
     SCHEMA_V25, SCHEMA_V26, SCHEMA_V27, SCHEMA_V28, SCHEMA_V29, SCHEMA_V30, SCHEMA_V31, SCHEMA_V32,
-    SCHEMA_V33,
+    SCHEMA_V33, SCHEMA_V34,
 ];
 const SCHEMA_V1: &str = "
 CREATE TABLE state_meta (
@@ -533,6 +533,21 @@ CREATE TABLE pending_skip (
 const SCHEMA_V33: &str = "
 ALTER TABLE pair ADD COLUMN remote_stats TEXT NOT NULL DEFAULT 'targets' CHECK(remote_stats IN ('targets','everywhere'));
 ALTER TABLE pending_pair ADD COLUMN remote_stats TEXT NOT NULL DEFAULT 'targets' CHECK(remote_stats IN ('targets','everywhere'));
+";
+
+// The identities of the folders each journaled run wrote, so Undo can
+// confirm them for a first sync that stopped before it recorded any with
+// the pair (ADR 0029). A row goes with its run's entries. A run an older
+// agent journaled has none, and Undo checks it against the pair's
+// identities, as before, so the floor stays.
+const SCHEMA_V34: &str = "
+CREATE TABLE journal_identity (
+    pair_id BLOB NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+    run TEXT NOT NULL CHECK(length(run) > 0),
+    left_identity BLOB NOT NULL CHECK(length(left_identity) = 16),
+    right_identity BLOB NOT NULL CHECK(length(right_identity) = 16),
+    PRIMARY KEY (pair_id, run)
+) STRICT, WITHOUT ROWID;
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -1516,6 +1531,9 @@ pub(super) mod tests {
     use std::cell::Cell;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::rc::Rc;
+
+    /// The identities of the folders the tests' journaled runs wrote.
+    pub(super) const FOLDERS: [&[u8]; 2] = [&[1; 16], &[2; 16]];
 
     pub(super) fn location() -> (tempfile::TempDir, StateLocation) {
         let directory = tempfile::Builder::new()

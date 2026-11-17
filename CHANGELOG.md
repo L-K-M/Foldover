@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Undo reverts a pair's first sync that stopped before it finished, for
+  example because you cancelled it. It refused with "This pair has no
+  sync to undo: its newest sync changed nothing or was undone", although
+  that sync had copied files. Each sync now records which folders it
+  wrote, so Undo still refuses another disk mounted in their place. A
+  first sync that stopped under an earlier version cannot be undone, and
+  Undo now says so (schema v34, ADR 0029).
 - Enabled menu-bar actions use full-contrast text and icons instead of
   looking disabled. Unavailable sync actions remain dimmed.
 - Database upgrades keep one completed recovery backup instead of leaving a

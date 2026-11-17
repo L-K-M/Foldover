@@ -10,8 +10,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use foldover_engine::{Commit, Engine};
 use foldover_state::{BaseUpdate, SnapshotEntry, StateLocation};
 use foldover_types::{
-    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairDraft, Side, SyncMode,
-    SyncPath,
+    BaselineEntry, Digest, EndpointId, EntryContent, EntryVersion, LocalRoot, PairDraft, Side,
+    SyncMode, SyncPath,
 };
 
 const DIRECTORIES: usize = 1_000;
@@ -109,6 +109,10 @@ fn engine_with_inputs() -> (tempfile::TempDir, Engine, foldover_types::PairConfi
             pair.revision(),
             Commit::Base {
                 run: "bench",
+                identities: [
+                    EndpointId::from_bytes([1; 16]),
+                    EndpointId::from_bytes([2; 16]),
+                ],
                 updates: &updates,
                 journal: &[],
                 observed: &[],

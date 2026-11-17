@@ -74,7 +74,7 @@ const UNREADABLE: &str = "This path or a related folder could not be read; left 
 
 impl PairRun {
     /// Undo `journal`, the pair's newest writing run or chain of runs. The
-    /// runs' roots must still be the recorded ones.
+    /// roots must still be the folders those runs wrote.
     pub fn undo(
         self,
         journal: Journal,
@@ -94,15 +94,7 @@ impl PairRun {
         if let Some(side) = self.pair.draft().unrecorded() {
             return Err(RunError::UndoUnavailable { side });
         }
-        // Only a recorded first run can have written anything.
-        let (Some(left), Some(right)) = (
-            self.identities.side(Side::Left),
-            self.identities.side(Side::Right),
-        ) else {
-            return Err(RunError::NothingToUndo);
-        };
-        let identities = [left, right];
-        self.check_roots(identities)?;
+        let identities = self.wrote(&journal)?;
 
         let revision = self.pair.revision();
         let scope = RunScope::new(started, self.pair.id(), options.clone());
@@ -251,6 +243,33 @@ impl PairRun {
             commit(revision, last).map_err(RunError::Commit)?;
         }
         Ok(report)
+    }
+
+    /// The identities of the folders `journal`'s runs wrote, once both
+    /// roots hold them. Each run keeps its own with its entries: a first
+    /// sync records the pair's only when it finishes, and one that stopped
+    /// may be undone too. A run an older agent journaled kept none; the
+    /// pair's stand in, as they always did.
+    fn wrote(&self, journal: &Journal) -> Result<[EndpointId; 2], RunError> {
+        let recorded = match (
+            self.identities.side(Side::Left),
+            self.identities.side(Side::Right),
+        ) {
+            (Some(left), Some(right)) => Some([left, right]),
+            _ => None,
+        };
+        let mut checked = None;
+        for run in &journal.runs {
+            let wrote = run
+                .identities
+                .or(recorded)
+                .ok_or(RunError::UndoUnconfirmed)?;
+            if checked != Some(wrote) {
+                self.check_roots(wrote)?;
+                checked = Some(wrote);
+            }
+        }
+        checked.ok_or(RunError::NothingToUndo)
     }
 
     /// What undoing `entry` needs, judged from the fresh observation, or

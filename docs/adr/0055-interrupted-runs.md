@@ -80,10 +80,11 @@ Two designs were reviewed and rejected:
     v32) instead of held in memory, so the continuing run honors them.
 - **Undo covers the chain.** A run continuing one that wrote, or that
   itself continued one, keeps the journal: its first batch leaves the
-  earlier runs' entries in place. Each run keeps its own name and archive
-  folder. Undo reverts every run left in the journal, newest first, each
-  entry from its own run's archive, and spends them all. Run names begin
-  with their start time, so name order is start order.
+  earlier runs' entries in place. Each run keeps its own name, archive
+  folder and the identities of the folders it wrote (ADR 0029). Undo
+  reverts every run left in the journal, newest first, each entry from
+  its own run's archive, and spends them all. Run names begin with their
+  start time, so name order is start order.
 - **Bounds.**
   - A journal whose oldest run started more than the archive retention
     minus a day ago (29 days) starts afresh: the continuing run prunes

@@ -1,11 +1,12 @@
 //! The newest writing run's operations per pair, so that run can be undone
 //! (ADR 0029). Entries are stored with the base updates their writes
-//! caused, in one transaction.
+//! caused, in one transaction, beside the identities of the folders the
+//! run wrote.
 
 use foldover_db::{JournalChange, JournalRow};
-use foldover_types::{BaselineEntry, EntryVersion, PairId, Side, SyncPath};
+use foldover_types::{BaselineEntry, EndpointId, EntryVersion, PairId, Side, SyncPath};
 
-use super::{Error, PairStore, SnapshotEntry, database_revision};
+use super::{Error, PairStore, SnapshotEntry, database_revision, identity};
 use crate::BaseUpdate;
 use crate::base::{decode, decode_entry, encode};
 
@@ -53,6 +54,9 @@ pub struct JournalEntry {
 pub struct RunJournal {
     pub run: String,
     pub entries: Vec<JournalEntry>,
+    /// The identities of the folders the run wrote, left then right; a
+    /// run an older agent journaled has none.
+    pub identities: Option<[EndpointId; 2]>,
 }
 
 /// What Undo reverts: the newest writing run, or an interrupted run and
@@ -66,11 +70,13 @@ pub struct Journal {
 #[derive(Clone, Copy, Debug)]
 pub enum JournalUpdate<'a> {
     None,
-    /// Writes of `run`; its first batch replaces the previous run's,
-    /// unless `run` continues an interrupted one.
+    /// Writes of `run` in the folders with these identities, left then
+    /// right; its first batch replaces the previous run's, unless `run`
+    /// continues an interrupted one.
     Record {
         run: &'a str,
         entries: &'a [JournalEntry],
+        identities: [EndpointId; 2],
     },
     /// An undo is changing files: hold the pair's automatic syncs, across
     /// restarts, until a person syncs it.
@@ -114,6 +120,7 @@ impl PairStore {
         let revision = database_revision(revision)?;
         let rows: Vec<JournalRow>;
         let undone: Vec<i64>;
+        let wrote: [EndpointId; 2];
         let change = match journal {
             JournalUpdate::None => JournalChange::None,
             JournalUpdate::Hold => JournalChange::Hold,
@@ -126,9 +133,19 @@ impl PairStore {
                 JournalChange::Undid { run, seqs: &undone }
             }
             JournalUpdate::Spend => JournalChange::Spend,
-            JournalUpdate::Record { run, entries } => {
+            JournalUpdate::Record {
+                run,
+                entries,
+                identities,
+            } => {
                 rows = entries.iter().map(row).collect::<Result<_, _>>()?;
-                JournalChange::Record { run, rows: &rows }
+                wrote = identities;
+                let [left, right] = &wrote;
+                JournalChange::Record {
+                    run,
+                    rows: &rows,
+                    identities: [left.as_bytes(), right.as_bytes()],
+                }
             }
         };
         self.change_base(id, revision, updates, change, observed, forgotten)
@@ -149,9 +166,17 @@ impl PairStore {
             .database
             .journal(id.as_bytes())?
             .into_iter()
-            .map(|(run, rows)| {
-                let entries = rows.into_iter().map(entry).collect::<Result<_, _>>()?;
-                Ok(RunJournal { run, entries })
+            .map(|run| {
+                let entries = run.rows.into_iter().map(entry).collect::<Result<_, _>>()?;
+                let identities = run
+                    .identities
+                    .map(|[left, right]| Ok::<_, Error>([identity(left)?, identity(right)?]))
+                    .transpose()?;
+                Ok(RunJournal {
+                    run: run.run,
+                    entries,
+                    identities,
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok((!runs.is_empty()).then_some(Journal { runs }))

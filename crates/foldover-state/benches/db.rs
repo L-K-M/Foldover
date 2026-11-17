@@ -13,8 +13,8 @@ use foldover_state::{
     BaseUpdate, JournalAction, JournalEntry, JournalUpdate, PairStore, SnapshotEntry, StateLocation,
 };
 use foldover_types::{
-    BaselineEntry, Digest, EntryContent, EntryVersion, LocalRoot, PairConfig, PairDraft, Side,
-    SyncMode, SyncPath,
+    BaselineEntry, Digest, EndpointId, EntryContent, EntryVersion, LocalRoot, PairConfig,
+    PairDraft, Side, SyncMode, SyncPath,
 };
 
 const DIRECTORIES: usize = 1_000;
@@ -120,6 +120,10 @@ fn commit_run(
                 JournalUpdate::Record {
                     run,
                     entries: &journal[start..start + batch.len()],
+                    identities: [
+                        EndpointId::from_bytes([1; 16]),
+                        EndpointId::from_bytes([2; 16]),
+                    ],
                 },
             )
             .unwrap();
