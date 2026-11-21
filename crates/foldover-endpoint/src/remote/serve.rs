@@ -48,6 +48,8 @@ const MAX_LABEL_BYTES: usize = 64;
 /// The link prepends one discriminator byte to serialized JSON.
 const REPLY_TAG_BYTES: usize = std::mem::size_of::<u8>();
 const ITEM_SEPARATOR_BYTES: usize = b",".len();
+/// A peer must not make us collect an entire archive into one page.
+const MAX_ARCHIVED_PAGE_ITEMS: usize = 1_000;
 /// PLAN.md §4: archives keep 30 days.
 const MIN_SHARED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -292,11 +294,7 @@ pub fn serve_folder(
             match after.transpose() {
                 Err(_) => Err(malformed()),
                 Ok(after) => endpoint
-                    .archived_items(
-                        &run,
-                        after.as_ref(),
-                        usize::try_from(limit).unwrap_or(usize::MAX),
-                    )
+                    .archived_items(&run, after.as_ref(), archive_page_limit(limit))
                     .map_err(|error| wire::scan_failure(&error))
                     .and_then(archived_reply),
             }
@@ -385,6 +383,12 @@ fn archived_reply(page: (Vec<ArchivedItem>, bool)) -> Result<PeerReply, FolderEr
         kept.push(item);
     }
     Ok(PeerReply::Items { items: kept, more })
+}
+
+fn archive_page_limit(requested: u64) -> usize {
+    usize::try_from(requested)
+        .unwrap_or(usize::MAX)
+        .min(MAX_ARCHIVED_PAGE_ITEMS)
 }
 
 /// Scan, reporting progress; then send the entries in batches and the
@@ -932,6 +936,12 @@ mod tests {
 #[cfg(test)]
 mod archive_reply_tests {
     use super::*;
+
+    #[test]
+    fn peer_archive_page_limit_is_bounded() {
+        assert_eq!(archive_page_limit(u64::MAX), MAX_ARCHIVED_PAGE_ITEMS);
+        assert_eq!(archive_page_limit(17), 17);
+    }
 
     fn item(index: usize) -> ArchivedItem {
         let path = format!("{}{:04}", "folder/".repeat(650), index);
